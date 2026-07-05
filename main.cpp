@@ -152,10 +152,10 @@ static void registerConfigValues() {
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CFloatValue>("plugin:kinetic-scroll:delta_multiplier", "Scroll delta multiplier", 1.25F));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:disable_in_browser", "Disable kinetic scrolling in browsers", 1));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:stop_on_target_change", "Stop inertia when scroll target changes", 1));
+    HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CStringValue>("plugin:kinetic-scroll:disabled_classes", "Comma or space separated classes with kinetic scrolling disabled", ""));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:debug", "Enable kinetic scroll debug logging", 0));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:stop_on_click", "Stop inertia on mouse click", 0));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:stop_on_focus", "Stop inertia on focus change", 0));
-    HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CStringValue>("plugin:kinetic-scroll:disabled_classes", "Comma or space separated classes with kinetic scrolling disabled", ""));
 }
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
@@ -183,8 +183,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pButtonCallback = Event::bus()->m_events.input.mouse.button.listen(onMouseButton);
     g_pWindowCallback = Event::bus()->m_events.window.active.listen(onActiveWindow);
     g_pConfigReloadCallback = Event::bus()->m_events.config.preReload.listen(onConfigPreReload);
-
-    HyprlandAPI::addNotification(PHANDLE, "[hypr-kinetic-scroll] Loaded!", CHyprColor{0.2, 0.8, 0.2, 1.0}, 3000);
 
     return {"hypr-kinetic-scroll", "Kinetic (inertial) scrolling for touchpads", "savonovv", "0.1"};
 }

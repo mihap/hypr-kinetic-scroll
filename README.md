@@ -61,9 +61,9 @@ Add these to your Hyprland config (e.g. `~/.config/hypr/input.conf`):
 
 ```ini
 plugin:kinetic-scroll:enabled = 1
-plugin:kinetic-scroll:decel = 0.99
-plugin:kinetic-scroll:min_velocity = 1.3
-plugin:kinetic-scroll:interval_ms = 8
+plugin:kinetic-scroll:decel = 0.92
+plugin:kinetic-scroll:min_velocity = 0.5
+plugin:kinetic-scroll:interval_ms = 16
 plugin:kinetic-scroll:delta_multiplier = 1.25
 plugin:kinetic-scroll:disable_in_browser = 1
 plugin:kinetic-scroll:stop_on_target_change = 1
