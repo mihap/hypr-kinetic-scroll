@@ -3,11 +3,13 @@
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/devices/IPointer.hpp>
 #include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/config/values/types/FloatValue.hpp>
 #include <hyprland/src/config/values/types/IntValue.hpp>
 #include <hyprland/src/config/values/types/StringValue.hpp>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 extern "C" {
 #include <lauxlib.h>
@@ -18,6 +20,7 @@ static Hyprutils::Signal::CHyprSignalListener g_pAxisCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pButtonCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pWindowCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pConfigReloadCallback;
+static std::vector<Hyprutils::Signal::CHyprSignalListener> g_pTouchpadCallbacks;
 
 static void onMouseAxis(const IPointer::SAxisEvent& e, Event::SCallbackInfo& /*info*/) {
     if (!g_pKineticState)
@@ -158,6 +161,22 @@ static void registerConfigValues() {
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:stop_on_focus", "Stop inertia on focus change", 0));
 }
 
+static void registerTouchpadCallbacks() {
+    for (const auto& pointer : g_pInputManager->m_pointers) {
+        if (!pointer || !pointer->m_isTouchpad)
+            continue;
+
+        g_pTouchpadCallbacks.emplace_back(pointer->m_pointerEvents.frame.listen([] {
+            if (g_pKineticState)
+                g_pKineticState->onPointerFrame();
+        }));
+        g_pTouchpadCallbacks.emplace_back(pointer->m_pointerEvents.holdBegin.listen([](const IPointer::SHoldBeginEvent&) {
+            if (g_pKineticState)
+                g_pKineticState->onTouchpadHold();
+        }));
+    }
+}
+
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
     return HYPRLAND_API_VERSION;
 }
@@ -183,6 +202,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pButtonCallback = Event::bus()->m_events.input.mouse.button.listen(onMouseButton);
     g_pWindowCallback = Event::bus()->m_events.window.active.listen(onActiveWindow);
     g_pConfigReloadCallback = Event::bus()->m_events.config.preReload.listen(onConfigPreReload);
+    registerTouchpadCallbacks();
 
     return {"hypr-kinetic-scroll", "Kinetic (inertial) scrolling for touchpads", "savonovv", "0.1"};
 }
@@ -194,6 +214,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_pButtonCallback.reset();
     g_pWindowCallback.reset();
     g_pConfigReloadCallback.reset();
+    g_pTouchpadCallbacks.clear();
 
     // Clean up kinetic state (removes wl timers)
     delete g_pKineticState;

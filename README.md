@@ -13,7 +13,8 @@ Releases: https://github.com/savonovv/hypr-kinetic-scroll/releases
 
 - Touchpad-only inertia (ignores real mouse wheels)
 - Exponential velocity smoothing with configurable decay
-- Cumulative momentum when swiping again during an active decay
+- Momentum starts only after fingers leave the touchpad
+- Touching the touchpad again stops active momentum
 - Synthetic scroll emission via Hyprland seat manager
 - Configurable thresholds and frame interval
 - Per-app enable/disable rules with exact class matching
@@ -138,7 +139,10 @@ synthetic events.
 
 1) Load the plugin (or enable via hyprpm).
 2) Run `hyprctl plugin list` and verify `hypr-kinetic-scroll` is listed.
-3) Do a short two-finger scroll and lift. You should see momentum.
+3) Move two fingers, keep them touching, and stop moving. The view should stop
+   immediately without momentum.
+4) Do a short two-finger scroll and lift. You should see momentum.
+5) Touch the pad again while momentum is active. Scrolling should stop.
 
 ## Debug
 
