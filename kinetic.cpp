@@ -147,19 +147,18 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
 
     const double scaledDelta = e.delta * getKineticConfigFloat("delta_multiplier", 1.25);
 
-    // New finger scroll while decaying => continue from current momentum
-    const bool resumedFromDecay = m_decaying;
-    if (resumedFromDecay) {
+    // Touching the pad again grabs the content and cancels existing momentum.
+    if (m_decaying) {
         if (getKineticConfigInt("debug", 0)) {
             std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
             if (log.is_open())
-                log << "[hypr-kinetic-scroll] onAxis: decaying -> resume self=" << this << "\n";
+                log << "[hypr-kinetic-scroll] onAxis: new gesture stops decay self=" << this << "\n";
         }
-        m_decaying = false;
-        wl_event_source_timer_update(m_decayTimer, 0);
+        stopKinetic("newGesture");
     }
 
     m_tracking              = true;
+    m_axisEventInFrame      = touchpadSource;
     m_scrollTargetWindowKey = targetKeys.windowKey;
     m_scrollTargetSurfaceKey = targetKeys.surfaceKey;
 
@@ -172,12 +171,6 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
             m_velocityV = alpha * scaledDelta + (1.0 - alpha) * m_velocityV;
         else
             m_velocityH = alpha * scaledDelta + (1.0 - alpha) * m_velocityH;
-    } else if (resumedFromDecay) {
-        // Continue inertia: add new gesture impulse on top of remaining momentum
-        if (e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
-            m_velocityV += scaledDelta;
-        else
-            m_velocityH += scaledDelta;
     } else {
         // First event or large gap - seed velocity directly
         if (e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
@@ -210,10 +203,33 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
         }
     }
 
-    // Reset stop detection: if no event arrives within 50ms, finger has lifted
-    wl_event_source_timer_update(m_stopTimer, 50);
+    // A quick lift produces an axis-less frame before this timer. If fingers
+    // remain still, discard the stale velocity instead of applying it later.
+    m_cancelOnStopTimer = touchpadSource;
+    wl_event_source_timer_update(m_stopTimer, touchpadSource ? 100 : 50);
     // Ensure decay timer is off while actively tracking
     wl_event_source_timer_update(m_decayTimer, 0);
+}
+
+void KineticState::onPointerFrame() {
+    if (m_axisEventInFrame) {
+        m_axisEventInFrame = false;
+        return;
+    }
+
+    if (!m_tracking)
+        return;
+
+    // An axis-less frame marks the end of the scroll sequence, but does not
+    // distinguish a finger lift from stationary fingers. Give libinput's hold
+    // event a chance to cancel stale velocity before emitting any momentum.
+    m_cancelOnStopTimer = false;
+    wl_event_source_timer_update(m_stopTimer, 32);
+}
+
+void KineticState::onTouchpadContact() {
+    if (m_tracking || m_decaying)
+        stopKinetic("touchpadContact");
 }
 
 void KineticState::stopKinetic(const char* reason) {
@@ -222,10 +238,12 @@ void KineticState::stopKinetic(const char* reason) {
         if (log.is_open())
             log << "[hypr-kinetic-scroll] stopKinetic reason=" << (reason ? reason : "(null)") << " self=" << this << "\n";
     }
-    m_velocityV   = 0.0;
-    m_velocityH   = 0.0;
-    m_tracking    = false;
-    m_decaying    = false;
+    m_velocityV            = 0.0;
+    m_velocityH            = 0.0;
+    m_tracking             = false;
+    m_decaying             = false;
+    m_axisEventInFrame     = false;
+    m_cancelOnStopTimer    = false;
     m_lastEventMs          = 0;
     m_scrollTargetWindowKey = 0;
     m_scrollTargetSurfaceKey = 0;
@@ -247,19 +265,37 @@ int KineticState::onStopTimer(void* data) {
     if (!self->m_tracking)
         return 0;
 
-    // Only start kinetic if velocity is above threshold
-    const double minVelocity = getKineticConfigFloat("min_velocity", 0.5);
-    if (std::abs(self->m_velocityV) < minVelocity && std::abs(self->m_velocityH) < minVelocity) {
-        self->m_tracking = false;
+    if (self->m_cancelOnStopTimer) {
+        self->stopKinetic("gestureIdle");
         return 0;
     }
 
-    // Finger lifted - begin kinetic decay
-    self->m_tracking = false;
-    self->m_decaying = true;
-
-    wl_event_source_timer_update(self->m_decayTimer, getKineticConfigInt("interval_ms", 16));
+    self->beginDecay("fallbackTimeout");
     return 0;
+}
+
+void KineticState::beginDecay(const char* reason) {
+    if (!m_tracking)
+        return;
+
+    if (getKineticConfigInt("debug", 0)) {
+        std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
+        if (log.is_open())
+            log << "[hypr-kinetic-scroll] beginDecay reason=" << reason << " self=" << this << "\n";
+    }
+
+    const double minVelocity = getKineticConfigFloat("min_velocity", 0.5);
+    if (std::abs(m_velocityV) < minVelocity && std::abs(m_velocityH) < minVelocity) {
+        stopKinetic("belowThreshold");
+        return;
+    }
+
+    m_tracking = false;
+    m_decaying = true;
+    m_cancelOnStopTimer = false;
+
+    wl_event_source_timer_update(m_stopTimer, 0);
+    wl_event_source_timer_update(m_decayTimer, getKineticConfigInt("interval_ms", 16));
 }
 
 int KineticState::onDecayTimer(void* data) {

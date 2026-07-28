@@ -11,6 +11,8 @@ class KineticState {
     ~KineticState();
 
     void onAxis(IPointer::SAxisEvent& e);
+    void onPointerFrame();
+    void onTouchpadContact();
     void stopKinetic(const char* reason = nullptr);
     void setAppRule(const std::string& appClass, bool enabled);
     void setDefaultAppRule(bool enabled);
@@ -19,6 +21,7 @@ class KineticState {
   private:
     static int onStopTimer(void* data);
     static int onDecayTimer(void* data);
+    void       beginDecay(const char* reason);
     void       emitSyntheticScroll();
     bool       hasAppRule(const std::string& windowClass) const;
     bool       shouldProcessForWindow(const std::string& windowClass) const;
@@ -28,6 +31,8 @@ class KineticState {
     uint32_t  m_lastEventMs           = 0;
     bool      m_tracking              = false;
     bool      m_decaying              = false;
+    bool      m_axisEventInFrame      = false;
+    bool      m_cancelOnStopTimer     = false;
     uintptr_t m_scrollTargetWindowKey = 0;
     uintptr_t m_scrollTargetSurfaceKey = 0;
 
