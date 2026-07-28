@@ -217,13 +217,19 @@ void KineticState::onPointerFrame() {
         return;
     }
 
-    if (m_tracking)
-        beginDecay("fingerAxisStop");
+    if (!m_tracking)
+        return;
+
+    // An axis-less frame marks the end of the scroll sequence, but does not
+    // distinguish a finger lift from stationary fingers. Give libinput's hold
+    // event a chance to cancel stale velocity before emitting any momentum.
+    m_cancelOnStopTimer = false;
+    wl_event_source_timer_update(m_stopTimer, 32);
 }
 
-void KineticState::onTouchpadHold() {
+void KineticState::onTouchpadContact() {
     if (m_tracking || m_decaying)
-        stopKinetic("touchpadHold");
+        stopKinetic("touchpadContact");
 }
 
 void KineticState::stopKinetic(const char* reason) {

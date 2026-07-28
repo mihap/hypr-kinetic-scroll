@@ -170,9 +170,13 @@ static void registerTouchpadCallbacks() {
             if (g_pKineticState)
                 g_pKineticState->onPointerFrame();
         }));
+        g_pTouchpadCallbacks.emplace_back(pointer->m_pointerEvents.motion.listen([](const IPointer::SMotionEvent&) {
+            if (g_pKineticState)
+                g_pKineticState->onTouchpadContact();
+        }));
         g_pTouchpadCallbacks.emplace_back(pointer->m_pointerEvents.holdBegin.listen([](const IPointer::SHoldBeginEvent&) {
             if (g_pKineticState)
-                g_pKineticState->onTouchpadHold();
+                g_pKineticState->onTouchpadContact();
         }));
     }
 }

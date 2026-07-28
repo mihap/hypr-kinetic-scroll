@@ -12,7 +12,7 @@ class KineticState {
 
     void onAxis(IPointer::SAxisEvent& e);
     void onPointerFrame();
-    void onTouchpadHold();
+    void onTouchpadContact();
     void stopKinetic(const char* reason = nullptr);
     void setAppRule(const std::string& appClass, bool enabled);
     void setDefaultAppRule(bool enabled);

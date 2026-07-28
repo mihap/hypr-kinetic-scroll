@@ -142,7 +142,10 @@ synthetic events.
 3) Move two fingers, keep them touching, and stop moving. The view should stop
    immediately without momentum.
 4) Do a short two-finger scroll and lift. You should see momentum.
-5) Touch the pad again while momentum is active. Scrolling should stop.
+5) Touch the pad with one finger while momentum is active. Scrolling should
+   stop immediately.
+6) Scroll quickly, stop with both fingers still touching, then lift them. No
+   queued momentum should resume after the lift.
 
 ## Debug
 
