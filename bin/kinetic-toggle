@@ -1,0 +1,16 @@
+#!/bin/sh
+# Toggle hypr-kinetic-scroll at runtime (Lua configs). Shows an on-screen note.
+# Usage: kinetic-toggle [on|off]
+case "${1:-}" in
+  on)  want=1 ;;
+  off) want=0 ;;
+  *)   want='' ;;
+esac
+exec hyprctl eval "
+local v = hl.get_config('plugin.kinetic_scroll.enabled')
+local on = not (v == 0 or v == false or v == nil)
+local want = ${want:-nil}
+local new = (want ~= nil) and want or (on and 0 or 1)
+hl.config({ plugin = { kinetic_scroll = { enabled = new } } })
+hl.notification.create({ text = 'Kinetic scroll: ' .. (new == 1 and 'ON' or 'OFF'), duration = 1500 })
+"
