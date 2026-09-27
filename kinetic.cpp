@@ -3,6 +3,8 @@
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
+#include <hyprland/src/output/Monitor.hpp>
+#include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/config/ConfigValue.hpp>
 #include <algorithm>
 #include <chrono>
@@ -213,7 +215,6 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
                               " dt=" + std::to_string(dt) +
                               " samples=" + std::to_string(m_samples.size()) +
                               " self=" + std::to_string(reinterpret_cast<uintptr_t>(this));
-            HyprlandAPI::addNotification(PHANDLE, msg, CHyprColor{0.2, 0.6, 1.0, 1.0}, 1000);
             std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
             if (log.is_open())
                 log << msg << "\n";
@@ -363,61 +364,95 @@ void KineticState::beginDecay(const char* reason) {
     m_cancelOnStopTimer = false;
     m_lastTick = std::chrono::steady_clock::now();
 
+    // Emit in lockstep with the monitor that shows the target window.
+    m_targetMonitorId = MONITOR_INVALID;
+    m_frameMs         = 1000.0 / 60.0;
+    PHLMONITOR mon;
+    if (const auto PWIN = g_pInputManager ? g_pInputManager->m_lastMouseFocus.lock() : nullptr)
+        mon = PWIN->m_monitor.lock();
+    // No window monitor: MONITOR_INVALID makes onRenderPre accept any monitor's frame.
+    if (mon) {
+        m_targetMonitorId = mon->m_id;
+        if (mon->m_refreshRate > 1.0f)
+            m_frameMs = 1000.0 / mon->m_refreshRate;
+    }
+
     wl_event_source_timer_update(m_stopTimer, 0);
     wl_event_source_timer_update(m_decayTimer, std::max<int64_t>(1, getKineticConfigInt("interval_ms", 16)));
 }
 
 int KineticState::onDecayTimer(void* data) {
     auto* self = static_cast<KineticState*>(data);
-
-    if (!self->m_decaying) {
-        if (getKineticConfigInt("debug", 0)) {
-            std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
-            if (log.is_open())
-                log << "[hypr-kinetic-scroll] decayTimer skipped (not decaying)\n";
-        }
+    if (!self->m_decaying)
         return 0;
-    }
+    // Watchdog: the per-frame render hook normally emits. If no frame came
+    // (nothing damaged, monitor mismatch, DPMS), keep the fling alive from here.
+    self->step(false);
+    return 0;
+}
 
+void KineticState::onRenderPre(PHLMONITOR mon) {
+    if (!m_decaying || !mon)
+        return;
+    if (m_targetMonitorId != MONITOR_INVALID && mon->m_id != m_targetMonitorId)
+        return;
+    step(true);
+}
+
+bool KineticState::targetStillValid() {
     const auto targetKeys = currentScrollTargetKeys();
 
-    if (getKineticConfigInt("stop_on_target_change", 1) && self->m_scrollTargetWindowKey != 0) {
-        const bool windowChanged  = targetKeys.windowKey != 0 && targetKeys.windowKey != self->m_scrollTargetWindowKey;
-        const bool surfaceChanged = targetKeys.surfaceKey != 0 && targetKeys.surfaceKey != self->m_scrollTargetSurfaceKey;
+    if (getKineticConfigInt("stop_on_target_change", 1) && m_scrollTargetWindowKey != 0) {
+        const bool windowChanged  = targetKeys.windowKey != 0 && targetKeys.windowKey != m_scrollTargetWindowKey;
+        const bool surfaceChanged = targetKeys.surfaceKey != 0 && targetKeys.surfaceKey != m_scrollTargetSurfaceKey;
         if (windowChanged || surfaceChanged) {
-            self->stopKinetic("targetChangedDecay");
-            return 0;
+            stopKinetic("targetChangedDecay");
+            return false;
         }
     }
 
     const auto PWIN = g_pInputManager ? g_pInputManager->m_lastMouseFocus.lock() : nullptr;
     if (PWIN) {
-        const bool hasRule = self->hasAppRule(PWIN->m_class);
+        const bool hasRule = hasAppRule(PWIN->m_class);
         if (classInList(PWIN->m_class, getKineticConfigString("disabled_classes", ""))) {
-            self->stopKinetic("disabledClassesDecay");
-            return 0;
+            stopKinetic("disabledClassesDecay");
+            return false;
         }
 
-        if (!self->shouldProcessForWindow(PWIN->m_class)) {
-            self->stopKinetic("appRuleDecay");
-            return 0;
+        if (!shouldProcessForWindow(PWIN->m_class)) {
+            stopKinetic("appRuleDecay");
+            return false;
         }
 
         if (getKineticConfigInt("disable_in_browser", 1) && !hasRule && classLooksLikeBrowser(PWIN->m_class)) {
-            self->stopKinetic("browserDecay");
-            return 0;
+            stopKinetic("browserDecay");
+            return false;
         }
     }
+
+    return true;
+}
+
+// One momentum step. Called once per compositor frame of the target monitor
+// (fromRender), or from the watchdog timer when no frame arrives.
+void KineticState::step(bool fromRender) {
+    if (!targetStillValid())
+        return;
 
     // Time-based decay: v(t) = v0 * e^(-lambda t). The emitted delta is the exact
     // integral over the elapsed wall time, so timer jitter changes neither the
     // total distance nor the perceived speed.
     const int  interval = std::max<int64_t>(1, getKineticConfigInt("interval_ms", 16));
     const auto now      = std::chrono::steady_clock::now();
-    double     dt       = std::chrono::duration<double, std::milli>(now - self->m_lastTick).count();
-    self->m_lastTick    = now;
+    double     dt       = std::chrono::duration<double, std::milli>(now - m_lastTick).count();
+
+    // A render right after a watchdog emission: nothing meaningful elapsed.
+    if (fromRender && dt < 0.25 * m_frameMs)
+        return;
+
+    m_lastTick = now;
     if (dt <= 0.0)
-        dt = interval;
+        dt = fromRender ? m_frameMs : interval;
     if (dt > 100.0)
         dt = 100.0; // lag or suspend: don't jump the content
 
@@ -428,23 +463,31 @@ int KineticState::onDecayTimer(void* data) {
     const double k      = std::exp(-lambda * dt);
     const double travel = (1.0 - k) / lambda;
 
-    const double deltaV = self->m_velocityV * travel;
-    const double deltaH = self->m_velocityH * travel;
-    self->m_velocityV *= k;
-    self->m_velocityH *= k;
+    const double deltaV = m_velocityV * travel;
+    const double deltaH = m_velocityH * travel;
+    m_velocityV *= k;
+    m_velocityH *= k;
 
-    self->emitSyntheticScroll(deltaV, deltaH);
+    emitSyntheticScroll(deltaV, deltaH);
 
-    const double minVelocity = getKineticConfigFloat("min_velocity", 0.1);
-    const bool   activeV     = std::abs(self->m_velocityV) * 16.0 >= minVelocity;
-    const bool   activeH     = std::abs(self->m_velocityH) * 16.0 >= minVelocity;
-    if (!activeV && !activeH) {
-        self->stopKinetic("decayDone");
-        return 0;
+    if (getKineticConfigInt("debug", 0)) {
+        std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
+        if (log.is_open())
+            log << "[hypr-kinetic-scroll] step src=" << (fromRender ? "render" : "timer") << " dt=" << dt << " dV=" << deltaV << " v=" << m_velocityV << "\n";
     }
 
-    wl_event_source_timer_update(self->m_decayTimer, interval);
-    return 0;
+    const double minVelocity = getKineticConfigFloat("min_velocity", 0.1);
+    const bool   activeV     = std::abs(m_velocityV) * 16.0 >= minVelocity;
+    const bool   activeH     = std::abs(m_velocityH) * 16.0 >= minVelocity;
+    if (!activeV && !activeH) {
+        stopKinetic("decayDone");
+        return;
+    }
+
+    // After a real frame, the watchdog only needs to catch a missing next frame.
+    // If the watchdog itself fired, frames aren't coming: poll at interval_ms.
+    const int watchdog = fromRender ? std::max<int>(interval, static_cast<int>(std::ceil(2.5 * m_frameMs))) : interval;
+    wl_event_source_timer_update(m_decayTimer, watchdog);
 }
 
 void KineticState::emitSyntheticScroll(double deltaV, double deltaH) {

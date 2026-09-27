@@ -20,6 +20,7 @@ static Hyprutils::Signal::CHyprSignalListener g_pAxisCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pButtonCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pWindowCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pConfigReloadCallback;
+static Hyprutils::Signal::CHyprSignalListener g_pRenderPreCallback;
 static std::vector<Hyprutils::Signal::CHyprSignalListener> g_pTouchpadCallbacks;
 
 static void onMouseAxis(const IPointer::SAxisEvent& e, Event::SCallbackInfo& /*info*/) {
@@ -207,6 +208,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pButtonCallback = Event::bus()->m_events.input.mouse.button.listen(onMouseButton);
     g_pWindowCallback = Event::bus()->m_events.window.active.listen(onActiveWindow);
     g_pConfigReloadCallback = Event::bus()->m_events.config.preReload.listen(onConfigPreReload);
+    g_pRenderPreCallback    = Event::bus()->m_events.render.pre.listen([](PHLMONITOR mon) {
+        if (g_pKineticState)
+            g_pKineticState->onRenderPre(mon);
+    });
     registerTouchpadCallbacks();
 
     return {"hypr-kinetic-scroll", "Kinetic (inertial) scrolling for touchpads", "savonovv", "0.1"};
@@ -219,6 +224,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_pButtonCallback.reset();
     g_pWindowCallback.reset();
     g_pConfigReloadCallback.reset();
+    g_pRenderPreCallback.reset();
     g_pTouchpadCallbacks.clear();
 
     // Clean up kinetic state (removes wl timers)

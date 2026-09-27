@@ -1,5 +1,8 @@
 #pragma once
 #include <hyprland/src/devices/IPointer.hpp>
+#include <hyprland/src/desktop/DesktopTypes.hpp>
+#include <hyprland/src/SharedDefs.hpp>
+#include <hyprland/src/macros.hpp>
 #include <wayland-server-core.h>
 #include <chrono>
 #include <cstdint>
@@ -15,6 +18,7 @@ class KineticState {
     void onAxis(IPointer::SAxisEvent& e);
     void onPointerFrame();
     void onTouchpadContact();
+    void onRenderPre(PHLMONITOR mon);
     void stopKinetic(const char* reason = nullptr);
     void setAppRule(const std::string& appClass, bool enabled);
     void setDefaultAppRule(bool enabled);
@@ -32,6 +36,8 @@ class KineticState {
     static int onDecayTimer(void* data);
     void       computeLaunchVelocity(uint32_t liftMs);
     void       beginDecay(const char* reason);
+    void       step(bool fromRender);
+    bool       targetStillValid();
     void       emitSyntheticScroll(double deltaV, double deltaH);
     bool       hasAppRule(const std::string& windowClass) const;
     bool       shouldProcessForWindow(const std::string& windowClass) const;
@@ -42,6 +48,8 @@ class KineticState {
     uint32_t  m_lastEventMs           = 0;
     std::deque<SSample>                   m_samples;
     std::chrono::steady_clock::time_point m_lastTick;
+    MONITORID                             m_targetMonitorId = MONITOR_INVALID;
+    double                                m_frameMs         = 1000.0 / 60.0;
     bool      m_tracking              = false;
     bool      m_decaying              = false;
     bool      m_axisEventInFrame      = false;
