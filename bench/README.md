@@ -16,7 +16,9 @@ One JSON object per gesture is appended, whether or not momentum launched.
 
 ## Protocol for a before/after run
 
-1. Same window (Ghostty, scrollback long enough), same monitor, same config.
+1. Same window, same monitor, same config. Fill the scrollback with the same
+   content each time: `clear; cat bench/scrollback.txt` (6000 numbered lines,
+   deterministic; regenerate with `bench/gen_scrollback.py`).
 2. 20 flicks: 10 fast, 10 medium. Let each fling run out; don't interrupt.
 3. 5 "scroll, pause, lift" gestures. These must *not* launch.
 4. 5 flicks interrupted by touching the pad.
