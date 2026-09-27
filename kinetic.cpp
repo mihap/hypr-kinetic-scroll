@@ -269,6 +269,7 @@ void KineticState::resetGesture() {
     m_velocityV         = 0.0;
     m_velocityH         = 0.0;
     m_owedStops         = 0;
+    m_lastEmitSurface.reset();
     m_lastStepFromTimer = false;
     m_est.reset();
     m_g = {};
@@ -548,6 +549,8 @@ void KineticState::emitSyntheticScroll(double deltaV, double deltaH, uint32_t ti
             g.tFirstEmit = Metrics::nowNs();
     }
 
+    m_lastEmitSurface = g_pSeatManager->m_state.pointerFocus;
+
     // Same axis source as the finger phase, so the client sees one gesture.
     if (deltaV != 0.0)
         g_pSeatManager->sendPointerAxis(timeMs, WL_POINTER_AXIS_VERTICAL_SCROLL, deltaV * m_g.scrollFactor, 0, 0, m_g.source, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
@@ -557,14 +560,21 @@ void KineticState::emitSyntheticScroll(double deltaV, double deltaH, uint32_t ti
     g_pSeatManager->sendPointerFrame();
 }
 
-// The axis_stop events the client never got, one per owed axis, to the
-// surface that owns the gesture. If pointer focus has moved elsewhere the
-// stop cannot be delivered through the seat; the client already received
-// pointer.leave, which ends the gesture on its side.
+// The axis_stop events the client never got, one per owed axis. They go to
+// the surface that last received our synthetic scroll: the gesture's own
+// surface, or a newer focus that momentum was allowed to follow. If pointer
+// focus has since moved elsewhere the stop cannot be delivered through the
+// seat; that client already received pointer.leave, which ends the gesture on
+// its side.
 void KineticState::sendOwedStops() {
     if (!m_owedStops || !g_pSeatManager)
         return;
-    if (m_g.hadSurface && (m_g.surface.expired() || g_pSeatManager->m_state.pointerFocus != m_g.surface))
+    const auto& focus = g_pSeatManager->m_state.pointerFocus;
+    if (!focus)
+        return;
+    const bool isGestureSurface = m_g.hadSurface && !m_g.surface.expired() && focus == m_g.surface;
+    const bool isEmitSurface    = !m_lastEmitSurface.expired() && focus == m_lastEmitSurface;
+    if (!isGestureSurface && !isEmitSurface)
         return;
 
     const auto     now    = std::chrono::steady_clock::now();

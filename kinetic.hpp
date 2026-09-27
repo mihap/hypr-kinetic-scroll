@@ -153,8 +153,11 @@ class KineticState {
     bool                                  m_lastStepFromTimer = false;
 
     // Protocol ownership: bit 0 = vertical, bit 1 = horizontal axis whose real
-    // axis_stop we swallowed and therefore owe the client.
-    uint8_t m_owedStops = 0;
+    // axis_stop we swallowed and therefore owe the client. The stops go to the
+    // surface that last received our synthetic scroll (normally the gesture's
+    // surface; with stop_on_target_change = 0 it may be a newer focus).
+    uint8_t                m_owedStops = 0;
+    WP<CWLSurfaceResource> m_lastEmitSurface;
 
     wl_event_source*                                    m_timer = nullptr;
     std::vector<WP<IPointer>>                           m_touchpads;
