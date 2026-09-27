@@ -7,7 +7,6 @@
 #include <hyprland/src/config/values/types/FloatValue.hpp>
 #include <hyprland/src/config/values/types/IntValue.hpp>
 #include <hyprland/src/config/values/types/StringValue.hpp>
-#include <fstream>
 #include <sstream>
 #include <vector>
 
@@ -24,7 +23,6 @@ static Hyprutils::Signal::CHyprSignalListener g_pButtonCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pWindowCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pConfigReloadCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pRenderPreCallback;
-static std::vector<Hyprutils::Signal::CHyprSignalListener> g_pTouchpadCallbacks;
 
 static void onMouseAxis(const IPointer::SAxisEvent& e, Event::SCallbackInfo& info) {
     if (!g_pKineticState)
@@ -38,39 +36,17 @@ static void onMouseAxis(const IPointer::SAxisEvent& e, Event::SCallbackInfo& inf
 }
 
 static void onMouseButton(const IPointer::SButtonEvent& e, Event::SCallbackInfo& /*info*/) {
-    if (!g_pKineticState)
+    if (!g_pKineticState || e.state != WL_POINTER_BUTTON_STATE_PRESSED)
         return;
-
-    if (!getKineticConfigInt("stop_on_click", 0))
-        return;
-
-    if (e.state != WL_POINTER_BUTTON_STATE_PRESSED)
-        return;
-    if (getKineticConfigInt("debug", 0)) {
-        std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
-        if (log.is_open())
-            log << "[hypr-kinetic-scroll] mouseButton -> stopKinetic\n";
-    }
-
-    // Any mouse click stops kinetic scrolling
-    g_pKineticState->stopKinetic("mouseButton");
+    if (*g_pKineticState->config().stopOnClick)
+        g_pKineticState->stopKinetic("mouseButton");
 }
 
 static void onActiveWindow() {
     if (!g_pKineticState)
         return;
-
-    if (!getKineticConfigInt("stop_on_focus", 0))
-        return;
-
-    if (getKineticConfigInt("debug", 0)) {
-        std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
-        if (log.is_open())
-            log << "[hypr-kinetic-scroll] activeWindow -> stopKinetic\n";
-    }
-
-    // Window focus change stops kinetic scrolling
-    g_pKineticState->stopKinetic("activeWindow");
+    if (*g_pKineticState->config().stopOnFocus)
+        g_pKineticState->stopKinetic("activeWindow");
 }
 
 static void onConfigPreReload() {
@@ -157,7 +133,7 @@ static void registerConfigValues() {
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:enabled", "Enable kinetic scrolling", 1));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CFloatValue>("plugin:kinetic-scroll:decel", "Velocity multiplier per 16 ms (0.967 ~ macOS)", 0.967F));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CFloatValue>("plugin:kinetic-scroll:min_velocity", "Stop below this many scroll units per 16 ms", 0.1F));
-    HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:interval_ms", "Kinetic timer interval", 16));
+    HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:interval_ms", "Watchdog interval when no compositor frame arrives", 16));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CFloatValue>("plugin:kinetic-scroll:delta_multiplier", "Launch velocity multiplier", 1.0F));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:velocity_window_ms", "Window before lift used to measure velocity", 64));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:disable_in_browser", "Disable kinetic scrolling in browsers", 1));
@@ -167,26 +143,6 @@ static void registerConfigValues() {
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CStringValue>("plugin:kinetic-scroll:metrics_file", "Append one JSON line per gesture with cost and behaviour metrics (empty = off)", ""));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:stop_on_click", "Stop inertia on mouse click", 0));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:stop_on_focus", "Stop inertia on focus change", 0));
-}
-
-static void registerTouchpadCallbacks() {
-    for (const auto& pointer : g_pInputManager->m_pointers) {
-        if (!pointer || !pointer->m_isTouchpad)
-            continue;
-
-        g_pTouchpadCallbacks.emplace_back(pointer->m_pointerEvents.frame.listen([] {
-            if (g_pKineticState)
-                g_pKineticState->onPointerFrame();
-        }));
-        g_pTouchpadCallbacks.emplace_back(pointer->m_pointerEvents.motion.listen([](const IPointer::SMotionEvent&) {
-            if (g_pKineticState)
-                g_pKineticState->onTouchpadContact();
-        }));
-        g_pTouchpadCallbacks.emplace_back(pointer->m_pointerEvents.holdBegin.listen([](const IPointer::SHoldBeginEvent&) {
-            if (g_pKineticState)
-                g_pKineticState->onTouchpadContact();
-        }));
-    }
 }
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
@@ -218,7 +174,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         if (g_pKineticState)
             g_pKineticState->onRenderPre(mon);
     });
-    registerTouchpadCallbacks();
 
     return {"hypr-kinetic-scroll", "Kinetic (inertial) scrolling for touchpads", "savonovv", "0.1"};
 }
@@ -231,7 +186,6 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_pWindowCallback.reset();
     g_pConfigReloadCallback.reset();
     g_pRenderPreCallback.reset();
-    g_pTouchpadCallbacks.clear();
 
     // Clean up kinetic state (removes wl timers)
     delete g_pKineticState;

@@ -15,6 +15,9 @@ Releases: https://github.com/savonovv/hypr-kinetic-scroll/releases
 - Exponential velocity smoothing with configurable decay
 - Momentum starts only after fingers leave the touchpad
 - Touching the touchpad again stops active momentum
+- Owns the gesture: the client never sees the finger lift while momentum runs (no double fling in GTK4/Chromium), momentum uses the finger axis source, and the plugin sends the axis_stop when momentum ends
+- Momentum is emitted in lockstep with the target monitor's frames; a frame is scheduled at launch so there is no hitch at lift
+- Window policy (rules, disabled classes, browser heuristic) is evaluated once per gesture, at its start
 - Synthetic scroll emission via Hyprland seat manager
 - Configurable thresholds and frame interval
 - Per-app enable/disable rules with exact class matching
@@ -126,7 +129,7 @@ Notes:
 
 - `decel` is a multiplier applied each frame (lower = faster stop).
 - `min_velocity` is the cutoff threshold for stopping inertia.
-- `interval_ms` controls the decay frame rate (lower = smoother).
+- `interval_ms` is only a watchdog: momentum is emitted once per compositor frame of the target monitor; the timer steps in when no frame arrives (nothing damaged, DPMS).
 - `delta_multiplier` scales swipe impulse (higher = faster acceleration buildup).
 - `disable_in_browser` keeps native browser kinetic scrolling when set to `1`.
 - `disabled_classes` disables kinetic scrolling for exact window classes.
