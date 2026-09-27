@@ -159,6 +159,7 @@ static void registerConfigValues() {
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:stop_on_target_change", "Stop inertia when scroll target changes", 1));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CStringValue>("plugin:kinetic-scroll:disabled_classes", "Comma or space separated classes with kinetic scrolling disabled", ""));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:debug", "Enable kinetic scroll debug logging", 0));
+    HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CStringValue>("plugin:kinetic-scroll:metrics_file", "Append one JSON line per gesture with cost and behaviour metrics (empty = off)", ""));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:stop_on_click", "Stop inertia on mouse click", 0));
     HyprlandAPI::addConfigValueV2(PHANDLE, makeShared<CIntValue>("plugin:kinetic-scroll:stop_on_focus", "Stop inertia on focus change", 0));
 }

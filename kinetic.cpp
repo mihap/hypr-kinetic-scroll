@@ -1,5 +1,6 @@
 #include "kinetic.hpp"
 #include "globals.hpp"
+#include "metrics.hpp"
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
@@ -105,6 +106,23 @@ KineticState::~KineticState() {
 void KineticState::onAxis(IPointer::SAxisEvent& e) {
     static uint64_t s_lastNotifyMs = 0;
 
+    // Metrics: attribute this call's cost to the gesture it belongs to, or to
+    // the idle bucket (wheel events, ignored sources) at scope exit.
+    struct SAxisScope {
+        KineticState* self;
+        int64_t       t0;
+        ~SAxisScope() {
+            auto& m = Metrics::g_metrics;
+            if (!m.enabled())
+                return;
+            const double ns = static_cast<double>(Metrics::nowNs() - t0);
+            if (m.active() && (self->m_tracking || self->m_decaying))
+                m.gesture().axisNs.add(ns);
+            else
+                m.global().idleAxisNs.add(ns);
+        }
+    } axisScope{this, Metrics::nowNs()};
+
     if (!getKineticConfigInt("enabled", 1))
         return;
 
@@ -151,6 +169,8 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
         // A second stop (other axis) is ignored because tracking is already off.
         if (touchpadSource && m_tracking) {
             m_axisEventInFrame = true;
+            if (Metrics::g_metrics.enabled())
+                Metrics::g_metrics.gesture().tLift = Metrics::nowNs();
             computeLaunchVelocity(e.timeMs);
             beginDecay("axisStop");
         }
@@ -165,6 +185,16 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
                 log << "[hypr-kinetic-scroll] onAxis: new gesture stops decay self=" << this << "\n";
         }
         stopKinetic("newGesture");
+    }
+
+    if (!m_tracking) {
+        // Gesture start. Re-read the metrics sink here (once per gesture) so
+        // the hot paths only test a cached bool.
+        static auto PMETRICS = CConfigValue<Config::STRING>("plugin:kinetic-scroll:metrics_file");
+        const std::string metricsPath = PMETRICS.good() ? std::string{*PMETRICS} : std::string{};
+        Metrics::g_metrics.setEnabled(!metricsPath.empty(), metricsPath);
+        if (Metrics::g_metrics.enabled())
+            Metrics::g_metrics.gestureBegin(axisScope.t0, PWIN ? PWIN->m_class : std::string{});
     }
 
     m_tracking              = true;
@@ -201,6 +231,9 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
     }
 
     m_lastEventMs = e.timeMs;
+
+    if (Metrics::g_metrics.enabled() && Metrics::g_metrics.active())
+        Metrics::g_metrics.gesture().samples.push_back({e.timeMs, vertical ? e.delta : 0.0, vertical ? 0.0 : e.delta});
 
     if (getKineticConfigInt("debug", 0)) {
         auto     now    = std::chrono::steady_clock::now();
@@ -254,6 +287,8 @@ void KineticState::onTouchpadContact() {
 }
 
 void KineticState::stopKinetic(const char* reason) {
+    Metrics::g_metrics.gestureEnd(Metrics::nowNs(), reason);
+
     if (getKineticConfigInt("debug", 0)) {
         std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
         if (log.is_open())
@@ -309,6 +344,14 @@ void KineticState::computeLaunchVelocity(uint32_t liftMs) {
     m_velocityV = sumV / span * mult;
     m_velocityH = sumH / span * mult;
 
+    if (Metrics::g_metrics.enabled()) {
+        auto& g   = Metrics::g_metrics.gesture();
+        g.launchV = m_velocityV;
+        g.launchH = m_velocityH;
+        g.span    = span;
+        g.tail    = tail;
+    }
+
     if (getKineticConfigInt("debug", 0)) {
         std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
         if (log.is_open())
@@ -336,6 +379,8 @@ int KineticState::onStopTimer(void* data) {
         return 0;
     }
 
+    if (Metrics::g_metrics.enabled())
+        Metrics::g_metrics.gesture().tLift = Metrics::nowNs();
     self->computeLaunchVelocity(self->m_lastEventMs);
     self->beginDecay("fallbackTimeout");
     return 0;
@@ -363,6 +408,12 @@ void KineticState::beginDecay(const char* reason) {
     m_decaying = true;
     m_cancelOnStopTimer = false;
     m_lastTick = std::chrono::steady_clock::now();
+
+    if (Metrics::g_metrics.enabled()) {
+        auto& g    = Metrics::g_metrics.gesture();
+        g.tLaunch  = Metrics::nowNs();
+        g.launched = true;
+    }
 
     // Emit in lockstep with the monitor that shows the target window, and use
     // the same scroll factor Hyprland applies to that window's real touchpad
@@ -399,8 +450,11 @@ int KineticState::onDecayTimer(void* data) {
 }
 
 void KineticState::onRenderPre(PHLMONITOR mon) {
-    if (!m_decaying || !mon)
+    if (!m_decaying || !mon) {
+        if (Metrics::g_metrics.enabled())
+            ++Metrics::g_metrics.global().idleRender;
         return;
+    }
     if (m_targetMonitorId != MONITOR_INVALID && mon->m_id != m_targetMonitorId)
         return;
     step(true);
@@ -443,8 +497,12 @@ bool KineticState::targetStillValid() {
 // One momentum step. Called once per compositor frame of the target monitor
 // (fromRender), or from the watchdog timer when no frame arrives.
 void KineticState::step(bool fromRender) {
-    if (!targetStillValid())
+    Metrics::CScope stepScope(Metrics::g_metrics.enabled() ? &Metrics::g_metrics.gesture().stepNs : nullptr);
+
+    if (!targetStillValid()) {
+        stepScope.retarget(nullptr); // gesture already finalized
         return;
+    }
 
     // Time-based decay: v(t) = v0 * e^(-lambda t). The emitted delta is the exact
     // integral over the elapsed wall time, so timer jitter changes neither the
@@ -456,6 +514,16 @@ void KineticState::step(bool fromRender) {
     // A render right after a watchdog emission: nothing meaningful elapsed.
     if (fromRender && dt < 0.25 * m_frameMs)
         return;
+
+    if (Metrics::g_metrics.enabled()) {
+        auto& g = Metrics::g_metrics.gesture();
+        if (fromRender) {
+            ++g.stepsRender;
+            g.renderDtMs.add(dt);
+        } else {
+            ++g.stepsTimer;
+        }
+    }
 
     m_lastTick = now;
     if (dt <= 0.0)
@@ -487,6 +555,7 @@ void KineticState::step(bool fromRender) {
     const bool   activeV     = std::abs(m_velocityV) * 16.0 >= minVelocity;
     const bool   activeH     = std::abs(m_velocityH) * 16.0 >= minVelocity;
     if (!activeV && !activeH) {
+        stepScope.retarget(nullptr); // gesture is finalized inside stopKinetic
         stopKinetic("decayDone");
         return;
     }
@@ -504,6 +573,15 @@ void KineticState::emitSyntheticScroll(double deltaV, double deltaH) {
 
     if (deltaV == 0.0 && deltaH == 0.0)
         return;
+
+    if (Metrics::g_metrics.enabled()) {
+        auto& g = Metrics::g_metrics.gesture();
+        ++g.emits;
+        g.travelV += std::abs(deltaV);
+        g.travelH += std::abs(deltaH);
+        if (g.tFirstEmit == 0)
+            g.tFirstEmit = Metrics::nowNs();
+    }
 
     if (deltaV != 0.0) {
         g_pSeatManager->sendPointerAxis(
