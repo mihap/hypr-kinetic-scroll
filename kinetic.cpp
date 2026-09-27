@@ -4,6 +4,7 @@
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/config/ConfigValue.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <string>
@@ -142,10 +143,17 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
     if (!touchpadSource && !smoothMouse)
         return;
 
-    if (e.delta == 0.0 && e.deltaDiscrete == 0)
+    if (e.delta == 0.0 && e.deltaDiscrete == 0) {
+        // libinput's axis_stop: the fingers left the pad. Launch right now instead of
+        // waiting for the empty frame plus a timer; that wait was a visible hitch.
+        // A second stop (other axis) is ignored because tracking is already off.
+        if (touchpadSource && m_tracking) {
+            m_axisEventInFrame = true;
+            computeLaunchVelocity(e.timeMs);
+            beginDecay("axisStop");
+        }
         return;
-
-    const double scaledDelta = e.delta * getKineticConfigFloat("delta_multiplier", 1.25);
+    }
 
     // Touching the pad again grabs the content and cancels existing momentum.
     if (m_decaying) {
@@ -162,21 +170,32 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
     m_scrollTargetWindowKey = targetKeys.windowKey;
     m_scrollTargetSurfaceKey = targetKeys.surfaceKey;
 
-    constexpr double alpha = 0.3;
-    uint32_t         dt    = e.timeMs - m_lastEventMs;
-
-    if (m_lastEventMs > 0 && dt > 0 && dt < 200) {
-        // Exponential smoothing of deltas
-        if (e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
-            m_velocityV = alpha * scaledDelta + (1.0 - alpha) * m_velocityV;
+    // Record the raw delta with the time it covers. Velocity is derived at lift
+    // from a short window of these, in units per ms, so the launch speed matches
+    // the finger regardless of the touchpad's report rate.
+    const bool vertical = e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL;
+    uint32_t   dt       = 0;
+    if (!m_samples.empty() && m_samples.back().t == e.timeMs) {
+        // Same frame, other axis: merge.
+        auto& last = m_samples.back();
+        if (vertical)
+            last.dv += e.delta;
         else
-            m_velocityH = alpha * scaledDelta + (1.0 - alpha) * m_velocityH;
+            last.dh += e.delta;
+        dt = last.dt;
     } else {
-        // First event or large gap - seed velocity directly
-        if (e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
-            m_velocityV = scaledDelta;
+        SSample s;
+        s.t = e.timeMs;
+        if (m_lastEventMs > 0 && e.timeMs >= m_lastEventMs && e.timeMs - m_lastEventMs < 200)
+            s.dt = e.timeMs - m_lastEventMs;
+        if (vertical)
+            s.dv = e.delta;
         else
-            m_velocityH = scaledDelta;
+            s.dh = e.delta;
+        dt = s.dt;
+        m_samples.push_back(s);
+        while (m_samples.size() > 64)
+            m_samples.pop_front();
     }
 
     m_lastEventMs = e.timeMs;
@@ -192,8 +211,7 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
                               " mouse=" + std::to_string(e.mouse ? 1 : 0) +
                               " discrete=" + std::to_string(e.deltaDiscrete) +
                               " dt=" + std::to_string(dt) +
-                              " v=" + std::to_string(m_velocityV) +
-                              " h=" + std::to_string(m_velocityH) +
+                              " samples=" + std::to_string(m_samples.size()) +
                               " self=" + std::to_string(reinterpret_cast<uintptr_t>(this));
             HyprlandAPI::addNotification(PHANDLE, msg, CHyprColor{0.2, 0.6, 1.0, 1.0}, 1000);
             std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
@@ -203,10 +221,12 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
         }
     }
 
-    // A quick lift produces an axis-less frame before this timer. If fingers
-    // remain still, discard the stale velocity instead of applying it later.
+    // Touchpad: idle safety only. Fingers resting on the pad for this long end the
+    // gesture, so a later lift launches nothing. (The velocity window already
+    // yields ~0 for a pause before lift; this covers a missing stop event.)
+    // Smooth mouse: no stop event exists, so a short silence means "lifted".
     m_cancelOnStopTimer = touchpadSource;
-    wl_event_source_timer_update(m_stopTimer, touchpadSource ? 100 : 50);
+    wl_event_source_timer_update(m_stopTimer, touchpadSource ? 200 : 50);
     // Ensure decay timer is off while actively tracking
     wl_event_source_timer_update(m_decayTimer, 0);
 }
@@ -220,11 +240,11 @@ void KineticState::onPointerFrame() {
     if (!m_tracking)
         return;
 
-    // An axis-less frame marks the end of the scroll sequence, but does not
-    // distinguish a finger lift from stationary fingers. Give libinput's hold
-    // event a chance to cancel stale velocity before emitting any momentum.
+    // Fallback only: the lift is normally handled synchronously from the
+    // zero-delta axis event. If a device ends a sequence with an axis-less
+    // frame and no stop event, launch after a short grace period.
     m_cancelOnStopTimer = false;
-    wl_event_source_timer_update(m_stopTimer, 32);
+    wl_event_source_timer_update(m_stopTimer, 100);
 }
 
 void KineticState::onTouchpadContact() {
@@ -247,8 +267,53 @@ void KineticState::stopKinetic(const char* reason) {
     m_lastEventMs          = 0;
     m_scrollTargetWindowKey = 0;
     m_scrollTargetSurfaceKey = 0;
+    m_samples.clear();
     wl_event_source_timer_update(m_stopTimer, 0);
     wl_event_source_timer_update(m_decayTimer, 0);
+}
+
+// Velocity at lift, in scroll units per ms, from the deltas of the last
+// velocity_window_ms before liftMs. Time the fingers spent still just before
+// lifting counts against it, so "scroll, pause, lift" launches nothing.
+void KineticState::computeLaunchVelocity(uint32_t liftMs) {
+    const uint32_t window = std::max<int64_t>(8, getKineticConfigInt("velocity_window_ms", 64));
+    const double   mult   = getKineticConfigFloat("delta_multiplier", 1.0);
+
+    m_velocityV = 0.0;
+    m_velocityH = 0.0;
+
+    const uint32_t tail = liftMs >= m_lastEventMs ? liftMs - m_lastEventMs : 0;
+    if (tail > window)
+        return;
+
+    double   sumV  = 0.0;
+    double   sumH  = 0.0;
+    uint32_t sumDt = 0;
+    for (auto it = m_samples.rbegin(); it != m_samples.rend(); ++it) {
+        if (it->t > liftMs)
+            continue;
+        if (liftMs - it->t > window)
+            break;
+        if (it->dt == 0)
+            continue; // first event of a gesture: covers unknown time
+        sumV += it->dv;
+        sumH += it->dh;
+        sumDt += it->dt;
+    }
+
+    const double span = static_cast<double>(sumDt + tail);
+    if (sumDt == 0 || span <= 0.0)
+        return;
+
+    m_velocityV = sumV / span * mult;
+    m_velocityH = sumH / span * mult;
+
+    if (getKineticConfigInt("debug", 0)) {
+        std::ofstream log("/tmp/hypr-kinetic-scroll.log", std::ios::app);
+        if (log.is_open())
+            log << "[hypr-kinetic-scroll] launch v=" << m_velocityV << "/ms h=" << m_velocityH << "/ms span=" << span << "ms tail=" << tail
+                << " samples=" << m_samples.size() << "\n";
+    }
 }
 
 int KineticState::onStopTimer(void* data) {
@@ -270,6 +335,7 @@ int KineticState::onStopTimer(void* data) {
         return 0;
     }
 
+    self->computeLaunchVelocity(self->m_lastEventMs);
     self->beginDecay("fallbackTimeout");
     return 0;
 }
@@ -284,8 +350,10 @@ void KineticState::beginDecay(const char* reason) {
             log << "[hypr-kinetic-scroll] beginDecay reason=" << reason << " self=" << this << "\n";
     }
 
-    const double minVelocity = getKineticConfigFloat("min_velocity", 0.5);
-    if (std::abs(m_velocityV) < minVelocity && std::abs(m_velocityH) < minVelocity) {
+    // min_velocity is in scroll units per 16 ms, the same scale as one real
+    // touchpad frame, so the number is comparable to the deltas in the debug log.
+    const double minVelocity = getKineticConfigFloat("min_velocity", 0.1);
+    if (std::abs(m_velocityV) * 16.0 < minVelocity && std::abs(m_velocityH) * 16.0 < minVelocity) {
         stopKinetic("belowThreshold");
         return;
     }
@@ -293,9 +361,10 @@ void KineticState::beginDecay(const char* reason) {
     m_tracking = false;
     m_decaying = true;
     m_cancelOnStopTimer = false;
+    m_lastTick = std::chrono::steady_clock::now();
 
     wl_event_source_timer_update(m_stopTimer, 0);
-    wl_event_source_timer_update(m_decayTimer, getKineticConfigInt("interval_ms", 16));
+    wl_event_source_timer_update(m_decayTimer, std::max<int64_t>(1, getKineticConfigInt("interval_ms", 16)));
 }
 
 int KineticState::onDecayTimer(void* data) {
@@ -340,51 +409,69 @@ int KineticState::onDecayTimer(void* data) {
         }
     }
 
-    // Apply deceleration
-    const double decel = getKineticConfigFloat("decel", 0.92);
-    self->m_velocityV *= decel;
-    self->m_velocityH *= decel;
+    // Time-based decay: v(t) = v0 * e^(-lambda t). The emitted delta is the exact
+    // integral over the elapsed wall time, so timer jitter changes neither the
+    // total distance nor the perceived speed.
+    const int  interval = std::max<int64_t>(1, getKineticConfigInt("interval_ms", 16));
+    const auto now      = std::chrono::steady_clock::now();
+    double     dt       = std::chrono::duration<double, std::milli>(now - self->m_lastTick).count();
+    self->m_lastTick    = now;
+    if (dt <= 0.0)
+        dt = interval;
+    if (dt > 100.0)
+        dt = 100.0; // lag or suspend: don't jump the content
 
-    const double minVelocity = getKineticConfigFloat("min_velocity", 0.5);
-    bool activeV = std::abs(self->m_velocityV) >= minVelocity;
-    bool activeH = std::abs(self->m_velocityH) >= minVelocity;
+    // decel is the velocity multiplier per 16 ms. 0.967 is close to the macOS
+    // "normal" rate of 0.998 per ms; the original 0.92 dies in half a second.
+    const double decel  = std::clamp(getKineticConfigFloat("decel", 0.967), 0.5, 0.9999);
+    const double lambda = -std::log(decel) / 16.0;
+    const double k      = std::exp(-lambda * dt);
+    const double travel = (1.0 - k) / lambda;
 
+    const double deltaV = self->m_velocityV * travel;
+    const double deltaH = self->m_velocityH * travel;
+    self->m_velocityV *= k;
+    self->m_velocityH *= k;
+
+    self->emitSyntheticScroll(deltaV, deltaH);
+
+    const double minVelocity = getKineticConfigFloat("min_velocity", 0.1);
+    const bool   activeV     = std::abs(self->m_velocityV) * 16.0 >= minVelocity;
+    const bool   activeH     = std::abs(self->m_velocityH) * 16.0 >= minVelocity;
     if (!activeV && !activeH) {
         self->stopKinetic("decayDone");
         return 0;
     }
 
-    self->emitSyntheticScroll();
-
-    // Re-arm for next frame
-    wl_event_source_timer_update(self->m_decayTimer, getKineticConfigInt("interval_ms", 16));
+    wl_event_source_timer_update(self->m_decayTimer, interval);
     return 0;
 }
 
-void KineticState::emitSyntheticScroll() {
+void KineticState::emitSyntheticScroll(double deltaV, double deltaH) {
     static auto PSCROLLFACTOR = CConfigValue<Hyprlang::FLOAT>("input:touchpad:scroll_factor");
-    auto     now         = std::chrono::steady_clock::now();
-    uint32_t timeMs      = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-    double   scrollFactor = *PSCROLLFACTOR;
+    auto        now           = std::chrono::steady_clock::now();
+    uint32_t    timeMs        = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    double      scrollFactor  = *PSCROLLFACTOR;
 
-    const double minVelocity = getKineticConfigFloat("min_velocity", 0.5);
+    if (deltaV == 0.0 && deltaH == 0.0)
+        return;
 
-    if (std::abs(m_velocityV) >= minVelocity) {
+    if (deltaV != 0.0) {
         g_pSeatManager->sendPointerAxis(
             timeMs,
             WL_POINTER_AXIS_VERTICAL_SCROLL,
-            m_velocityV * scrollFactor,
-            0,   // discrete
-            0,   // v120
+            deltaV * scrollFactor,
+            0, // discrete
+            0, // v120
             WL_POINTER_AXIS_SOURCE_CONTINUOUS,
             WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
     }
 
-    if (std::abs(m_velocityH) >= minVelocity) {
+    if (deltaH != 0.0) {
         g_pSeatManager->sendPointerAxis(
             timeMs,
             WL_POINTER_AXIS_HORIZONTAL_SCROLL,
-            m_velocityH * scrollFactor,
+            deltaH * scrollFactor,
             0,
             0,
             WL_POINTER_AXIS_SOURCE_CONTINUOUS,
