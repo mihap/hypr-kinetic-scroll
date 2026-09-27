@@ -364,12 +364,19 @@ void KineticState::beginDecay(const char* reason) {
     m_cancelOnStopTimer = false;
     m_lastTick = std::chrono::steady_clock::now();
 
-    // Emit in lockstep with the monitor that shows the target window.
+    // Emit in lockstep with the monitor that shows the target window, and use
+    // the same scroll factor Hyprland applies to that window's real touchpad
+    // events (window rule scroll_touchpad overrides input:touchpad:scroll_factor).
+    static auto PSCROLLFACTOR = CConfigValue<Hyprlang::FLOAT>("input:touchpad:scroll_factor");
+    m_scrollFactor    = *PSCROLLFACTOR;
     m_targetMonitorId = MONITOR_INVALID;
     m_frameMs         = 1000.0 / 60.0;
     PHLMONITOR mon;
-    if (const auto PWIN = g_pInputManager ? g_pInputManager->m_lastMouseFocus.lock() : nullptr)
+    if (const auto PWIN = g_pInputManager ? g_pInputManager->m_lastMouseFocus.lock() : nullptr) {
         mon = PWIN->m_monitor.lock();
+        if (PWIN->isScrollTouchpadOverridden())
+            m_scrollFactor = PWIN->getScrollTouchpad();
+    }
     // No window monitor: MONITOR_INVALID makes onRenderPre accept any monitor's frame.
     if (mon) {
         m_targetMonitorId = mon->m_id;
@@ -491,10 +498,9 @@ void KineticState::step(bool fromRender) {
 }
 
 void KineticState::emitSyntheticScroll(double deltaV, double deltaH) {
-    static auto PSCROLLFACTOR = CConfigValue<Hyprlang::FLOAT>("input:touchpad:scroll_factor");
-    auto        now           = std::chrono::steady_clock::now();
-    uint32_t    timeMs        = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-    double      scrollFactor  = *PSCROLLFACTOR;
+    auto         now          = std::chrono::steady_clock::now();
+    uint32_t     timeMs       = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    const double scrollFactor = m_scrollFactor;
 
     if (deltaV == 0.0 && deltaH == 0.0)
         return;

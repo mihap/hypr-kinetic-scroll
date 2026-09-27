@@ -50,6 +50,7 @@ class KineticState {
     std::chrono::steady_clock::time_point m_lastTick;
     MONITORID                             m_targetMonitorId = MONITOR_INVALID;
     double                                m_frameMs         = 1000.0 / 60.0;
+    double                                m_scrollFactor    = 1.0;
     bool      m_tracking              = false;
     bool      m_decaying              = false;
     bool      m_axisEventInFrame      = false;
