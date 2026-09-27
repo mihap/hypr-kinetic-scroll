@@ -1,4 +1,5 @@
 #pragma once
+#include "physics.hpp"
 #include <hyprland/src/devices/IPointer.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/managers/SeatManager.hpp>
@@ -7,7 +8,6 @@
 #include <hyprland/src/SharedDefs.hpp>
 #include <hyprland/src/macros.hpp>
 #include <wayland-server-core.h>
-#include <array>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -28,7 +28,32 @@
 // While DECAYING the plugin *owns* the gesture: the client never sees the real
 // finger lift, receives one synthetic scroll per compositor frame with the
 // same axis source as the finger phase, and gets an axis_stop from us when
-// momentum ends.
+// momentum ends. Which axes are owed a stop is tracked separately from which
+// axes still have velocity.
+//
+// Physics (velocity estimate, decay integral) lives in physics.hpp; this class
+// is the adapter to Hyprland: events, focus, timers, frames, config.
+
+// Why a gesture ended. Typed so that "does the client's gesture continue with
+// real events?" is a property of the reason, not a string comparison.
+enum class eStop : uint8_t {
+    BELOW_THRESHOLD,  // lift with ~no velocity; the real stop passed through
+    DECAY_DONE,       // momentum ran out
+    NEW_GESTURE,      // fingers back and moving: the client's gesture continues
+    TOUCHPAD_CONTACT, // fingers back (hold / motion): momentum cancelled
+    GESTURE_IDLE,     // fingers rested on the pad; nothing to launch
+    TARGET_CHANGED,   // pointer focus moved to another window/surface
+    TARGET_DESTROYED, // the target window/surface went away
+    MOUSE_BUTTON,
+    ACTIVE_WINDOW,
+    RULE_DISABLED,
+    UNLOAD,
+};
+const char* stopName(eStop s);
+constexpr bool clientGestureContinues(eStop s) {
+    return s == eStop::NEW_GESTURE;
+}
+
 class KineticState {
   public:
     KineticState();
@@ -39,7 +64,7 @@ class KineticState {
     void onPointerFrame();
     void onTouchpadContact();
     void onRenderPre(PHLMONITOR mon);
-    void stopKinetic(const char* reason);
+    void stopKinetic(eStop reason);
 
     void setAppRule(const std::string& appClass, bool enabled);
     void setDefaultAppRule(bool enabled);
@@ -76,17 +101,14 @@ class KineticState {
         DECAYING, // momentum running
     };
 
-    struct SSample {
-        uint32_t t  = 0; // libinput timestamp (ms)
-        uint32_t dt = 0; // ms since previous sample of this gesture, 0 if unknown
-        double   dv = 0.0;
-        double   dh = 0.0;
-    };
+    enum class eTarget : uint8_t { SAME, CHANGED, DESTROYED, NONE };
 
     // Everything about the current gesture that is fixed at its start.
     struct SGestureCtx {
         PHLWINDOWREF           window;
         WP<CWLSurfaceResource> surface;
+        bool                   hadWindow  = false;
+        bool                   hadSurface = false;
         PHLMONITORREF          monitor;
         double                 frameMs            = 1000.0 / 60.0;
         double                 scrollFactor       = 1.0;
@@ -94,57 +116,52 @@ class KineticState {
         bool                   touchpad           = true; // false: smooth mouse, no stop events
         bool                   stopOnTargetChange = true;
         bool                   debug              = false;
-        double                 lambda             = 0.0; // decay rate per ms
-        double                 minVelPerMs        = 0.0;
-        double                 launchMultiplier   = 1.0;
-        uint32_t               windowMs           = 64;
-        int                    tailCapMs          = 0; // 0 = auto (from the pad's report interval)
-        int                    intervalMs         = 16;
+        Physics::SDecay        decay;
+        double                 minVelPerMs      = 0.0;
+        double                 launchMultiplier = 1.0;
+        uint32_t               windowMs         = 64;
+        uint32_t               tailCapMs        = 0; // 0 = auto
+        int                    intervalMs       = 16;
     };
 
     static int onTimer(void* data);
 
-    bool       beginGesture(const IPointer::SAxisEvent& e, bool touchpadSource);
-    void       recordSample(const IPointer::SAxisEvent& e);
-    void       computeLaunchVelocity(uint32_t liftMs);
-    bool       launch(const char* reason);
-    void       step(bool fromRender);
-    bool       targetStillValid();
-    void       emitSyntheticScroll(double deltaV, double deltaH, uint32_t timeMs);
-    void       sendGestureStop();
-    void       rescanTouchpads();
-    void       resetGesture();
-    bool       windowAllowed(const std::string& cls) const;
+    bool          beginGesture(const IPointer::SAxisEvent& e, bool touchpadSource);
+    eTarget       targetState() const;
+    bool          launch(uint32_t liftMs, const char* how);
+    void          step(bool fromRender);
+    void          emitSyntheticScroll(double deltaV, double deltaH, uint32_t timeMs);
+    void          sendOwedStops();
+    void          resetGesture();
+    bool          touchpadsStale() const;
+    void          rescanTouchpads();
+    bool          windowAllowed(const std::string& cls) const;
     std::ostream* log();
 
-    SConfig                               m_cfg;
-    eState                                m_state = eState::IDLE;
-    SGestureCtx                           m_g;
+    SConfig                    m_cfg;
+    eState                     m_state = eState::IDLE;
+    SGestureCtx                m_g;
+    Physics::CVelocityEstimator m_est;
 
-    // Sample ring for velocity at lift.
-    static constexpr size_t               SAMPLE_CAP = 64;
-    std::array<SSample, SAMPLE_CAP>       m_samples{};
-    size_t                                m_sampleHead    = 0; // next write slot
-    size_t                                m_sampleCount   = 0;
-    uint32_t                              m_lastEventMs   = 0;
-    bool                                  m_axisInFrame   = false;
-    bool                                  m_timerLaunches = false; // TRACKING timer: launch (true) or abandon (false)
+    bool                       m_axisInFrame   = false;
+    bool                       m_timerLaunches = false; // TRACKING timer: launch (true) or abandon (false)
 
     // Momentum. Velocities in scroll units per ms.
-    double                                m_velocityV       = 0.0;
-    double                                m_velocityH       = 0.0;
-    bool                                  m_activeV         = false;
-    bool                                  m_activeH         = false;
-    bool                                  m_clientInGesture = false;
+    double                                m_velocityV = 0.0;
+    double                                m_velocityH = 0.0;
     std::chrono::steady_clock::time_point m_lastTick;
+    bool                                  m_lastStepFromTimer = false;
 
-    wl_event_source*                      m_timer = nullptr;
+    // Protocol ownership: bit 0 = vertical, bit 1 = horizontal axis whose real
+    // axis_stop we swallowed and therefore owe the client.
+    uint8_t m_owedStops = 0;
 
+    wl_event_source*                                    m_timer = nullptr;
+    std::vector<WP<IPointer>>                           m_touchpads;
     std::vector<Hyprutils::Signal::CHyprSignalListener> m_touchpadListeners;
-    size_t                                              m_pointersSeen = 0;
 
     std::unordered_map<std::string, bool> m_perAppRules;
     bool                                  m_defaultAppRule = true;
 
-    std::ofstream                         m_log;
+    std::ofstream m_log;
 };

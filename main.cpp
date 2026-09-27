@@ -39,14 +39,14 @@ static void onMouseButton(const IPointer::SButtonEvent& e, Event::SCallbackInfo&
     if (!g_pKineticState || e.state != WL_POINTER_BUTTON_STATE_PRESSED)
         return;
     if (*g_pKineticState->config().stopOnClick)
-        g_pKineticState->stopKinetic("mouseButton");
+        g_pKineticState->stopKinetic(eStop::MOUSE_BUTTON);
 }
 
 static void onActiveWindow() {
     if (!g_pKineticState)
         return;
     if (*g_pKineticState->config().stopOnFocus)
-        g_pKineticState->stopKinetic("activeWindow");
+        g_pKineticState->stopKinetic(eStop::ACTIVE_WINDOW);
 }
 
 static void onConfigPreReload() {

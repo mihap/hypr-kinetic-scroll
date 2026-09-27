@@ -65,7 +65,11 @@ ROWS = [
     ("samples in window", "n", lambda g: len(g["samples"])),
     # Gesture ownership (present from the ownership commit on; missing = 0/false)
     ("real stops swallowed", "n", lambda g: g.get("stops_cancelled", 0)),
-    ("our stop sent", "0/1", lambda g: 1.0 if g.get("stop_sent") else 0.0),
+    # stops_sent counts delivered synthetic axis_stop events (files older than the
+    # ownership fix only have a stop_sent flag, which was set even when nothing
+    # was sent; treat it as unknown -> 0).
+    ("our stops sent", "n", lambda g: g.get("stops_sent", 0)),
+    ("stops still owed", "n", lambda g: g.get("stops_owed", 0)),
 ]
 
 

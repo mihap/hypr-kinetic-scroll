@@ -22,6 +22,14 @@ Releases: https://github.com/savonovv/hypr-kinetic-scroll/releases
 - Configurable thresholds and frame interval
 - Per-app enable/disable rules with exact class matching
 
+## Layout
+
+- `physics.hpp`: launch-velocity estimator and decay integrator. No Hyprland
+  dependencies; replayable and unit-tested (`make test`).
+- `kinetic.cpp`: the compositor adapter (events, focus, timers, frames, config,
+  gesture ownership).
+- `metrics.*`: optional per-gesture instrumentation, see `bench/README.md`.
+
 ## Requirements
 
 - Hyprland development headers
@@ -38,6 +46,7 @@ make
 
 ```bash
 make            # build hypr-kinetic-scroll.so
+make test       # compositor-free physics tests (tests/physics_test.cpp)
 make reinstall  # hyprpm remove + add + enable from REPO (default: this fork); asks for sudo
 make reload     # unload dev builds, then hyprpm reload -n
 make update     # hyprpm update (rebuild after a Hyprland update)

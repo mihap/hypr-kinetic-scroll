@@ -1,7 +1,8 @@
 #include "metrics.hpp"
+#include <wayland-server-core.h>
 #include <fstream>
-#include <sstream>
 #include <iomanip>
+#include <sstream>
 
 namespace Metrics {
 
@@ -22,21 +23,7 @@ namespace Metrics {
         return out;
     }
 
-    void CCollector::gestureEnd(int64_t now, const char* reason) {
-        if (!m_active)
-            return;
-        m_active = false;
-        if (!m_enabled || m_path.empty())
-            return;
-
-        const int64_t flushStart = nowNs();
-
-        auto& g      = m_gesture;
-        g.tEnd       = now;
-        g.stopReason = reason ? reason : "";
-        if (g.launched)
-            ++m_global.launches;
-
+    static std::string serialize(const SGesture& g, const SGlobal& gl) {
         const auto ms = [](int64_t a, int64_t b) { return (a && b) ? static_cast<double>(b - a) / 1e6 : -1.0; };
 
         std::ostringstream o;
@@ -52,7 +39,8 @@ namespace Metrics {
         o << ",\"span_ms\":" << g.span << ",\"tail_ms\":" << g.tail;
         o << ",\"travel_v\":" << g.travelV << ",\"travel_h\":" << g.travelH;
         o << ",\"steps_render\":" << g.stepsRender << ",\"steps_timer\":" << g.stepsTimer << ",\"emits\":" << g.emits;
-        o << ",\"stops_cancelled\":" << g.stopsCancelled << ",\"stop_sent\":" << (g.stopSent ? "true" : "false");
+        o << ",\"stops_cancelled\":" << g.stopsCancelled << ",\"stops_sent\":" << g.stopsSent << ",\"stops_owed\":" << g.stopsOwed;
+        o << ",\"stop_sent\":" << (g.stopsSent > 0 ? "true" : "false"); // kept for older analyzers
         o << ",";
         stat(o, "axis_ns", g.axisNs);
         o << ",";
@@ -60,8 +48,9 @@ namespace Metrics {
         o << ",";
         stat(o, "render_dt_ms", g.renderDtMs);
         o << ",\"global\":{";
-        stat(o, "idle_axis_ns", m_global.idleAxisNs);
-        o << ",\"idle_render\":" << m_global.idleRender << ",\"gestures\":" << m_global.gestures << ",\"launches\":" << m_global.launches << "}";
+        stat(o, "idle_axis_ns", gl.idleAxisNs);
+        o << ",\"idle_render\":" << gl.idleRender << ",\"gestures\":" << gl.gestures << ",\"launches\":" << gl.launches << ",\"samples_dropped\":" << gl.samplesDropped
+          << "}";
         o << ",\"samples\":[";
         for (size_t i = 0; i < g.samples.size(); ++i) {
             if (i)
@@ -69,11 +58,55 @@ namespace Metrics {
             o << "[" << g.samples[i].t << "," << g.samples[i].dv << "," << g.samples[i].dh << "]";
         }
         o << "]}\n";
+        return o.str();
+    }
 
-        std::ofstream f(m_path, std::ios::app);
-        if (f.is_open())
-            f << o.str();
+    void CCollector::gestureEnd(int64_t now) {
+        if (!m_active)
+            return;
+        m_active = false;
+        if (!m_enabled || m_path.empty())
+            return;
 
-        m_flushNs += nowNs() - flushStart;
+        const int64_t t0 = nowNs();
+
+        m_gesture.tEnd = now;
+        if (m_gesture.launched)
+            ++m_global.launches;
+
+        // Only a move into the queue happens here; formatting and the write
+        // run from the idle callback, outside input/render dispatch.
+        m_pending.emplace_back(std::move(m_gesture));
+        m_gesture = {};
+        if (m_loop && !m_idle)
+            m_idle = wl_event_loop_add_idle(m_loop, onIdle, this);
+
+        m_flushNs += nowNs() - t0;
+    }
+
+    void CCollector::onIdle(void* data) {
+        auto* self   = static_cast<CCollector*>(data);
+        self->m_idle = nullptr; // idle sources are one-shot and freed by the loop
+        self->writePending();
+    }
+
+    void CCollector::writePending() {
+        if (m_pending.empty())
+            return;
+        {
+            std::ofstream f(m_path, std::ios::app);
+            if (f.is_open())
+                for (const auto& g : m_pending)
+                    f << serialize(g, m_global);
+        } // close inside: nothing of the write escapes this function
+        m_pending.clear();
+    }
+
+    void CCollector::flushNow() {
+        if (m_idle) {
+            wl_event_source_remove(m_idle);
+            m_idle = nullptr;
+        }
+        writePending();
     }
 }

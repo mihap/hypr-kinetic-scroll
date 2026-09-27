@@ -15,11 +15,18 @@ BRANCH ?=
 
 all: $(OUT)
 
-$(OUT): $(SRC) globals.hpp kinetic.hpp metrics.hpp
+$(OUT): $(SRC) globals.hpp kinetic.hpp metrics.hpp physics.hpp
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(SRC) -o $@ `$(PKG_CONFIG)`
 
 clean:
-	rm -f $(OUT)
+	rm -f $(OUT) tests/physics_test
+
+# Compositor-free physics tests (no Hyprland headers needed).
+test: tests/physics_test
+	./tests/physics_test
+
+tests/physics_test: tests/physics_test.cpp physics.hpp
+	$(CXX) -O2 -std=c++2b -I. $< -o $@
 
 # --- hyprpm -----------------------------------------------------------------
 # hyprpm clones the repository's default branch only, so BRANCH must be a
@@ -58,4 +65,4 @@ unload-all:
 	@for p in $$(grep -h "$(PLUGIN_NAME)" /proc/$$(pidof Hyprland | cut -d' ' -f1)/maps 2>/dev/null | awk '{print $$6}' | sort -u); do \
 		hyprctl plugin unload $$p >/dev/null && echo "unloaded $$p"; done
 
-.PHONY: all clean reinstall update reload dev-load unload-dev unload-all
+.PHONY: all clean test reinstall update reload dev-load unload-dev unload-all
