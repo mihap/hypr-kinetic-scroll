@@ -75,6 +75,8 @@ namespace Metrics {
         uint64_t                stepsRender = 0;
         uint64_t                stepsTimer  = 0;
         uint64_t                emits       = 0;
+        uint64_t                stopsCancelled = 0; // real axis_stop events swallowed
+        bool                    stopSent       = false; // our synthetic stop delivered
 
         double                  launchV = 0.0, launchH = 0.0; // units per ms
         double                  span    = 0.0;                // ms of samples used

@@ -52,6 +52,7 @@ namespace Metrics {
         o << ",\"span_ms\":" << g.span << ",\"tail_ms\":" << g.tail;
         o << ",\"travel_v\":" << g.travelV << ",\"travel_h\":" << g.travelH;
         o << ",\"steps_render\":" << g.stepsRender << ",\"steps_timer\":" << g.stepsTimer << ",\"emits\":" << g.emits;
+        o << ",\"stops_cancelled\":" << g.stopsCancelled << ",\"stop_sent\":" << (g.stopSent ? "true" : "false");
         o << ",";
         stat(o, "axis_ns", g.axisNs);
         o << ",";

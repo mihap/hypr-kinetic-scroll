@@ -26,13 +26,15 @@ static Hyprutils::Signal::CHyprSignalListener g_pConfigReloadCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pRenderPreCallback;
 static std::vector<Hyprutils::Signal::CHyprSignalListener> g_pTouchpadCallbacks;
 
-static void onMouseAxis(const IPointer::SAxisEvent& e, Event::SCallbackInfo& /*info*/) {
+static void onMouseAxis(const IPointer::SAxisEvent& e, Event::SCallbackInfo& info) {
     if (!g_pKineticState)
         return;
 
     auto event = e;
-    g_pKineticState->onAxis(event);
-    // Don't cancel - let the original scroll event pass through to the app
+    // Real scroll deltas always pass through. Only the finger-lift stop is
+    // swallowed while momentum is live; the plugin sends its own stop later.
+    if (g_pKineticState->onAxis(event))
+        info.cancelled = true;
 }
 
 static void onMouseButton(const IPointer::SButtonEvent& e, Event::SCallbackInfo& /*info*/) {

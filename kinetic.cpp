@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cctype>
 #include <sstream>
+#include <string_view>
 
 static bool classLooksLikeBrowser(std::string cls) {
     for (auto& c : cls)
@@ -103,7 +104,7 @@ KineticState::~KineticState() {
         wl_event_source_remove(m_decayTimer);
 }
 
-void KineticState::onAxis(IPointer::SAxisEvent& e) {
+bool KineticState::onAxis(IPointer::SAxisEvent& e) {
     static uint64_t s_lastNotifyMs = 0;
 
     // Metrics: attribute this call's cost to the gesture it belongs to, or to
@@ -126,7 +127,7 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
     } axisScope{this, Metrics::nowNs(), Metrics::g_metrics.flushNsTotal()};
 
     if (!getKineticConfigInt("enabled", 1))
-        return;
+        return false;
 
     const auto targetKeys = currentScrollTargetKeys();
 
@@ -143,19 +144,19 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
         if (classInList(PWIN->m_class, getKineticConfigString("disabled_classes", ""))) {
             if (m_decaying)
                 stopKinetic("disabledClasses");
-            return;
+            return false;
         }
 
         if (!shouldProcessForWindow(PWIN->m_class)) {
             if (m_decaying)
                 stopKinetic("appRule");
-            return;
+            return false;
         }
 
         if (getKineticConfigInt("disable_in_browser", 1) && !hasRule && classLooksLikeBrowser(PWIN->m_class)) {
             if (m_decaying)
                 stopKinetic("browserFocus");
-            return;
+            return false;
         }
     }
 
@@ -163,20 +164,34 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
     const bool touchpadSource = (e.source == WL_POINTER_AXIS_SOURCE_FINGER || e.source == WL_POINTER_AXIS_SOURCE_CONTINUOUS);
     const bool smoothMouse    = (e.mouse && e.deltaDiscrete == 0);
     if (!touchpadSource && !smoothMouse)
-        return;
+        return false;
 
     if (e.delta == 0.0 && e.deltaDiscrete == 0) {
+        if (!touchpadSource)
+            return false;
+
         // libinput's axis_stop: the fingers left the pad. Launch right now instead of
         // waiting for the empty frame plus a timer; that wait was a visible hitch.
-        // A second stop (other axis) is ignored because tracking is already off.
-        if (touchpadSource && m_tracking) {
+        if (m_tracking) {
             m_axisEventInFrame = true;
             if (Metrics::g_metrics.enabled())
                 Metrics::g_metrics.gesture().tLift = Metrics::nowNs();
             computeLaunchVelocity(e.timeMs);
             beginDecay("axisStop");
         }
-        return;
+
+        // Gesture ownership: while momentum is live the client must not see the
+        // finger lift. Delivered, it would end the gesture (GTK's scroll-end) or
+        // start the client's own fling on top of ours (GTK4, Chromium). Every
+        // stop of this lift is swallowed (libinput may send one per axis); we
+        // send the stop ourselves when momentum ends. If momentum did not
+        // launch (pause before lift, below threshold) the real stop passes.
+        if (m_decaying) {
+            if (Metrics::g_metrics.enabled())
+                ++Metrics::g_metrics.gesture().stopsCancelled;
+            return true;
+        }
+        return false;
     }
 
     // Touching the pad again grabs the content and cancels existing momentum.
@@ -201,6 +216,7 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
 
     m_tracking              = true;
     m_axisEventInFrame      = touchpadSource;
+    m_source                = touchpadSource ? e.source : WL_POINTER_AXIS_SOURCE_CONTINUOUS;
     m_scrollTargetWindowKey = targetKeys.windowKey;
     m_scrollTargetSurfaceKey = targetKeys.surfaceKey;
 
@@ -265,6 +281,7 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
     wl_event_source_timer_update(m_stopTimer, touchpadSource ? 200 : 50);
     // Ensure decay timer is off while actively tracking
     wl_event_source_timer_update(m_decayTimer, 0);
+    return false;
 }
 
 void KineticState::onPointerFrame() {
@@ -289,6 +306,16 @@ void KineticState::onTouchpadContact() {
 }
 
 void KineticState::stopKinetic(const char* reason) {
+    // Close the gesture for the client if we swallowed its finger lift. Not on
+    // newGesture: the real axis event that triggered it is about to be
+    // delivered and simply continues the same gesture, as a re-touch on macOS.
+    if (m_clientInGesture && (!reason || std::string_view{reason} != "newGesture"))
+        sendGestureStop();
+    m_clientInGesture = false;
+    m_activeV         = false;
+    m_activeH         = false;
+    m_source          = WL_POINTER_AXIS_SOURCE_FINGER;
+
     Metrics::g_metrics.gestureEnd(Metrics::nowNs(), reason);
 
     if (getKineticConfigInt("debug", 0)) {
@@ -410,6 +437,12 @@ void KineticState::beginDecay(const char* reason) {
     m_decaying = true;
     m_cancelOnStopTimer = false;
     m_lastTick = std::chrono::steady_clock::now();
+
+    // Only touchpad gestures have a client-visible lift to own; smooth-mouse
+    // sequences never produce a stop event.
+    m_clientInGesture = m_source == WL_POINTER_AXIS_SOURCE_FINGER;
+    m_activeV         = std::abs(m_velocityV) * 16.0 >= minVelocity;
+    m_activeH         = std::abs(m_velocityH) * 16.0 >= minVelocity;
 
     if (Metrics::g_metrics.enabled()) {
         auto& g    = Metrics::g_metrics.gesture();
@@ -585,6 +618,7 @@ void KineticState::emitSyntheticScroll(double deltaV, double deltaH) {
             g.tFirstEmit = Metrics::nowNs();
     }
 
+    // Same axis source as the finger phase, so the client sees one gesture.
     if (deltaV != 0.0) {
         g_pSeatManager->sendPointerAxis(
             timeMs,
@@ -592,7 +626,7 @@ void KineticState::emitSyntheticScroll(double deltaV, double deltaH) {
             deltaV * scrollFactor,
             0, // discrete
             0, // v120
-            WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+            m_source,
             WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
     }
 
@@ -603,9 +637,34 @@ void KineticState::emitSyntheticScroll(double deltaV, double deltaH) {
             deltaH * scrollFactor,
             0,
             0,
-            WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+            m_source,
             WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
     }
 
     g_pSeatManager->sendPointerFrame();
+}
+
+// The axis_stop the client never got: one per axis that was scrolling, to the
+// surface that owns the gesture. If pointer focus moved elsewhere the old
+// client is left as it would be after any focus change mid-gesture.
+void KineticState::sendGestureStop() {
+    if (!g_pSeatManager)
+        return;
+    const auto PSURF = g_pSeatManager->m_state.pointerFocus.lock();
+    if (!PSURF || reinterpret_cast<uintptr_t>(PSURF.get()) != m_scrollTargetSurfaceKey)
+        return;
+
+    const auto     now    = std::chrono::steady_clock::now();
+    const uint32_t timeMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+    // sendPointerAxis with value 0 and a non-wheel source emits axis + axis_stop.
+    if (m_activeV)
+        g_pSeatManager->sendPointerAxis(timeMs, WL_POINTER_AXIS_VERTICAL_SCROLL, 0.0, 0, 0, m_source, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+    if (m_activeH)
+        g_pSeatManager->sendPointerAxis(timeMs, WL_POINTER_AXIS_HORIZONTAL_SCROLL, 0.0, 0, 0, m_source, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+    if (m_activeV || m_activeH)
+        g_pSeatManager->sendPointerFrame();
+
+    if (Metrics::g_metrics.enabled())
+        Metrics::g_metrics.gesture().stopSent = true;
 }

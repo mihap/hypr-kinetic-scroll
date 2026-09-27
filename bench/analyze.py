@@ -63,6 +63,9 @@ ROWS = [
     ("travel |v|", "u", lambda g: g["travel_v"]),
     ("lift tail", "ms", lambda g: g["tail_ms"]),
     ("samples in window", "n", lambda g: len(g["samples"])),
+    # Gesture ownership (present from the ownership commit on; missing = 0/false)
+    ("real stops swallowed", "n", lambda g: g.get("stops_cancelled", 0)),
+    ("our stop sent", "0/1", lambda g: 1.0 if g.get("stop_sent") else 0.0),
 ]
 
 

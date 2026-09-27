@@ -15,7 +15,8 @@ class KineticState {
     KineticState();
     ~KineticState();
 
-    void onAxis(IPointer::SAxisEvent& e);
+    // Returns true if the event must be cancelled (not delivered to the client).
+    bool onAxis(IPointer::SAxisEvent& e);
     void onPointerFrame();
     void onTouchpadContact();
     void onRenderPre(PHLMONITOR mon);
@@ -39,6 +40,7 @@ class KineticState {
     void       step(bool fromRender);
     bool       targetStillValid();
     void       emitSyntheticScroll(double deltaV, double deltaH);
+    void       sendGestureStop();
     bool       hasAppRule(const std::string& windowClass) const;
     bool       shouldProcessForWindow(const std::string& windowClass) const;
 
@@ -51,6 +53,12 @@ class KineticState {
     MONITORID                             m_targetMonitorId = MONITOR_INVALID;
     double                                m_frameMs         = 1000.0 / 60.0;
     double                                m_scrollFactor    = 1.0;
+    // Gesture ownership: once momentum launches, the client never sees the real
+    // finger lift (we cancel it) and receives our stop when momentum ends.
+    wl_pointer_axis_source                m_source          = WL_POINTER_AXIS_SOURCE_FINGER;
+    bool                                  m_clientInGesture = false;
+    bool                                  m_activeV         = false;
+    bool                                  m_activeH         = false;
     bool      m_tracking              = false;
     bool      m_decaying              = false;
     bool      m_axisEventInFrame      = false;
