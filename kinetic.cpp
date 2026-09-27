@@ -240,7 +240,8 @@ bool KineticState::beginGesture(const IPointer::SAxisEvent& e, bool touchpadSour
     m_g.stopOnTargetChange = *m_cfg.stopOnTargetChange != 0;
     m_g.intervalMs         = std::max<int64_t>(1, *m_cfg.intervalMs);
     m_g.windowMs           = std::max<int64_t>(8, *m_cfg.velocityWindowMs);
-    m_g.tailCapMs          = std::max<int64_t>(0, *m_cfg.liftTailCapMs);
+    m_g.tailGraceMs        = std::max<int64_t>(0, *m_cfg.liftTailGraceMs);
+    m_g.tailFadeMs         = std::max<int64_t>(m_g.tailGraceMs + 1, *m_cfg.liftTailFadeMs);
     m_g.launchMultiplier   = *m_cfg.deltaMultiplier;
     m_g.decay              = Physics::SDecay::fromDecelPer16ms(*m_cfg.decel);
     // min_velocity is in scroll units per 16 ms, comparable to real deltas.
@@ -416,7 +417,7 @@ bool KineticState::launch(uint32_t liftMs, const char* how) {
     if (m_state != eState::TRACKING)
         return false;
 
-    const auto l = m_est.launch(liftMs, m_g.windowMs, m_g.tailCapMs, m_g.launchMultiplier);
+    const auto l = m_est.launch(liftMs, m_g.windowMs, m_g.tailGraceMs, m_g.tailFadeMs, m_g.launchMultiplier);
     m_velocityV  = l.v;
     m_velocityH  = l.h;
 
@@ -428,7 +429,7 @@ bool KineticState::launch(uint32_t liftMs, const char* how) {
         g.tail    = l.tailMs;
     }
     if (auto* lg = log())
-        *lg << "[hypr-kinetic-scroll] launch(" << how << ") v=" << l.v << "/ms h=" << l.h << "/ms span=" << l.spanMs << "ms tail=" << l.tailMs << " cap=" << l.capMs
+        *lg << "[hypr-kinetic-scroll] launch(" << how << ") v=" << l.v << "/ms h=" << l.h << "/ms span=" << l.spanMs << "ms tail=" << l.tailMs << " rest=" << l.rest
             << " samples=" << l.samples << "\n";
 
     if (std::abs(m_velocityV) < m_g.minVelPerMs && std::abs(m_velocityH) < m_g.minVelPerMs) {

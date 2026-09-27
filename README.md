@@ -85,10 +85,13 @@ Add these to your Hyprland config (e.g. `~/.config/hypr/input.conf`):
 
 ```ini
 plugin:kinetic-scroll:enabled = 1
-plugin:kinetic-scroll:decel = 0.92
+plugin:kinetic-scroll:decel = 0.967
 plugin:kinetic-scroll:min_velocity = 0.5
 plugin:kinetic-scroll:interval_ms = 16
-plugin:kinetic-scroll:delta_multiplier = 1.25
+plugin:kinetic-scroll:delta_multiplier = 1.0
+plugin:kinetic-scroll:velocity_window_ms = 32
+plugin:kinetic-scroll:lift_tail_grace_ms = 28
+plugin:kinetic-scroll:lift_tail_fade_ms = 80
 plugin:kinetic-scroll:disable_in_browser = 1
 plugin:kinetic-scroll:stop_on_target_change = 1
 plugin:kinetic-scroll:disabled_classes =
@@ -147,10 +150,12 @@ kinetic-scroll-rule enable firefox
 
 Notes:
 
-- `decel` is a multiplier applied each frame (lower = faster stop).
-- `min_velocity` is the cutoff threshold for stopping inertia.
+- `decel` is the velocity multiplier per 16 ms, applied continuously over the real elapsed time (0.967 is close to macOS; lower = faster stop).
+- `min_velocity` is the cutoff, in scroll units per 16 ms, below which inertia stops (and below which a lift launches nothing).
+- `velocity_window_ms`: the launch velocity is the mean speed of the touchpad reports within this many ms before the *last* report, so a flick that accelerates to the end launches at its end speed.
+- `lift_tail_grace_ms` / `lift_tail_fade_ms`: the motionless time between the last report and the finger lift. Up to the grace it costs nothing (a lift takes a few report intervals even at full speed); from there the launch fades linearly to nothing at the fade value, so "scroll, pause, lift" launches nothing.
 - `interval_ms` is only a watchdog: momentum is emitted once per compositor frame of the target monitor; the timer steps in when no frame arrives (nothing damaged, DPMS).
-- `delta_multiplier` scales swipe impulse (higher = faster acceleration buildup).
+- `delta_multiplier` scales the launch velocity (1.0 = the finger's speed at lift).
 - `disable_in_browser` keeps native browser kinetic scrolling when set to `1`.
 - `disabled_classes` disables kinetic scrolling for exact window classes.
 - `stop_on_target_change` stops active inertia when scroll target window changes.

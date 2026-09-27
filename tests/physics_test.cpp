@@ -1,5 +1,4 @@
-// Deterministic tests for physics.hpp. No Hyprland needed:
-//   g++ -std=c++2b -I.. physics_test.cpp -o physics_test && ./physics_test
+// Deterministic tests for physics.hpp. No Hyprland needed:  make test
 #include "../physics.hpp"
 #include <cmath>
 #include <cstdio>
@@ -17,8 +16,10 @@ static bool near(double a, double b, double tol) {
 
 using namespace Physics;
 
-// Finger moving at 1 unit/ms, reported every 7 ms for 70 ms, lifted 7 ms after
-// the last report (one missed report, inside the auto cap).
+// Defaults used by the plugin.
+constexpr uint32_t WINDOW = 32, GRACE = 28, FADE = 80;
+
+// Finger moving at 1 unit/ms, reported every 7 ms for 70 ms.
 static CVelocityEstimator constantFlick(uint32_t t0) {
     CVelocityEstimator est;
     for (int i = 0; i < 11; ++i)
@@ -26,38 +27,57 @@ static CVelocityEstimator constantFlick(uint32_t t0) {
     return est;
 }
 
+// Finger accelerating 2 -> 12 units/ms over 10 reports (a real fast flick profile,
+// longer than the window so the early ramp must be excluded).
+static CVelocityEstimator acceleratingFlick(uint32_t t0) {
+    CVelocityEstimator est;
+    const double per[] = {14, 21, 28, 35, 42, 49, 57, 66, 75, 84};
+    for (int i = 0; i < 10; ++i)
+        est.add(t0 + 7 * i, true, per[i]);
+    return est;
+}
+
 int main() {
-    // 1. Launch velocity tracks the finger for a clean lift.
+    // 1. Constant speed: launch equals the finger speed, tail inside grace is free.
     {
         auto est = constantFlick(1000);
-        auto l   = est.launch(1000 + 70 + 7, 64, 0, 1.0);
-        check(l.tailMs == 7 && l.capMs == 10, "auto cap = 1.5 report intervals (7 ms -> 10 ms)");
-        check(l.v > 0.85 && l.v <= 1.0, "clean lift launches near finger speed");
-        check(l.h == 0.0, "no horizontal component");
+        for (uint32_t tail : {7u, 14u, 21u, 28u}) {
+            auto l = est.launch(1000 + 70 + tail, WINDOW, GRACE, FADE, 1.0);
+            check(near(l.v, 1.0, 1e-9) && l.tailMs == tail, "constant flick launches at finger speed (tail inside grace)");
+        }
+        check(est.launch(1077, WINDOW, GRACE, FADE, 1.0).h == 0.0, "no horizontal component");
     }
 
-    // 2. A long tail (fingers resting) launches nothing.
+    // 2. Accelerating flick: launch reflects the end speed, not the mean of the ramp.
+    {
+        auto   est  = acceleratingFlick(1000);
+        auto   l    = est.launch(1000 + 63 + 21, WINDOW, GRACE, FADE, 1.0);
+        double mean = (21 + 28 + 35 + 42 + 49 + 57 + 66 + 75 + 84) / 63.0; // all timed reports
+        double end  = (49 + 57 + 66 + 75 + 84) / 35.0;                     // reports within 32 ms of the last one
+        check(near(l.v, end, 1e-9) && l.v > mean * 1.2, "accelerating flick launches at end speed, not the ramp mean");
+    }
+
+    // 3. Hesitation: beyond the grace the launch fades, and a pause launches nothing.
     {
         auto est = constantFlick(1000);
-        auto l   = est.launch(1000 + 70 + 300, 64, 0, 1.0);
-        check(l.v == 0.0 && l.tailMs == 300, "pause before lift -> no launch");
+        auto l54 = est.launch(1070 + 54, WINDOW, GRACE, FADE, 1.0); // halfway through the fade
+        auto l80 = est.launch(1070 + 80, WINDOW, GRACE, FADE, 1.0);
+        auto l300 = est.launch(1070 + 300, WINDOW, GRACE, FADE, 1.0);
+        check(near(l54.v, 0.5, 1e-9), "tail halfway through the fade launches at half speed");
+        check(l80.v == 0.0 && l300.v == 0.0, "tail at/after the fade launches nothing");
     }
 
-    // 3. Tail inside the grace zone is free; beyond it the launch fades.
+    // 4. Sparse device: reports further apart than the window still yield a velocity.
     {
-        auto est  = constantFlick(1000);
-        auto l14  = est.launch(1000 + 70 + 14, 64, 0, 1.0);
-        auto l20  = est.launch(1000 + 70 + 20, 64, 0, 1.0);
-        auto l40  = est.launch(1000 + 70 + 40, 64, 0, 1.0);
-        auto l64  = est.launch(1000 + 70 + 64, 64, 0, 1.0);
-        // Both inside the grace zone: full launch (the tiny difference is the
-        // window covering a different set of reports).
-        check(l14.v > 0.8 && l20.v > 0.8 && near(l14.v, l20.v, 0.05), "tail 14 and 20 ms (<= 2 caps) both launch fully");
-        check(l40.v < l20.v && l40.v > 0.0, "tail 40 ms launches slower");
-        check(near(l64.v, 0.0, 1e-9), "tail at window edge fades to zero");
+        CVelocityEstimator est;
+        est.add(0, true, 10.0);
+        est.add(50, true, 50.0);
+        est.add(100, true, 50.0);
+        auto l = est.launch(110, WINDOW, GRACE, FADE, 1.0);
+        check(near(l.v, 1.0, 1e-9) && l.samples == 2, "at least two timed reports are used");
     }
 
-    // 4. Same-frame axis reports merge into one sample.
+    // 5. Same-frame axis reports merge into one sample.
     {
         CVelocityEstimator est;
         est.add(10, true, 1.0);
@@ -66,17 +86,16 @@ int main() {
         check(est.count() == 2, "same-timestamp reports merge");
     }
 
-    // 5. Timestamp rollover: identical result whether or not the gesture
-    //    straddles 2^32 ms.
+    // 6. Timestamp rollover: identical result whether or not the gesture straddles 2^32 ms.
     {
-        auto a  = constantFlick(1000);
-        auto b  = constantFlick(0xFFFFFFFFu - 40); // lift lands after the wrap
-        auto la = a.launch(1000 + 77, 64, 0, 1.0);
-        auto lb = b.launch(0xFFFFFFFFu - 40 + 77, 64, 0, 1.0);
+        auto a  = acceleratingFlick(1000);
+        auto b  = acceleratingFlick(0xFFFFFFFFu - 20); // lift lands after the wrap
+        auto la = a.launch(1000 + 63 + 21, WINDOW, GRACE, FADE, 1.0);
+        auto lb = b.launch(0xFFFFFFFFu - 20 + 63 + 21, WINDOW, GRACE, FADE, 1.0);
         check(near(la.v, lb.v, 1e-12) && la.tailMs == lb.tailMs && la.samples == lb.samples, "launch is rollover-safe");
     }
 
-    // 6. Decay: total travel of a fling equals v0 / lambda regardless of frame size.
+    // 7. Decay: total travel of a fling equals v0 / lambda regardless of frame size.
     {
         const auto d  = SDecay::fromDecelPer16ms(0.967);
         double     v  = 2.0, h = 0.0, total = 0.0, dv, dh;
@@ -93,7 +112,7 @@ int main() {
         check(near(total, total2, 1e-6), "travel independent of frame time");
     }
 
-    // 7. Stall: velocity decays over the real time, displacement is bounded.
+    // 8. Stall: velocity decays over the real time, displacement is bounded.
     {
         const auto d = SDecay::fromDecelPer16ms(0.967);
         double     v = 2.0, h = 0.0, dv, dh;

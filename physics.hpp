@@ -20,20 +20,24 @@ namespace Physics {
     struct SLaunch {
         double   v       = 0.0; // scroll units per ms
         double   h       = 0.0;
-        double   spanMs  = 0.0; // ms of samples used (+ counted tail)
+        double   spanMs  = 0.0; // ms of reports the velocity was measured over
         uint32_t tailMs  = 0;   // last motion report -> lift
-        uint32_t capMs   = 0;   // tail cap applied
+        double   rest    = 1.0; // hesitation factor applied (1 = none)
         uint32_t samples = 0;   // samples inside the window
     };
 
-    // Ring of the most recent motion reports of one gesture. Velocity at lift is
-    // the sum of deltas over the last windowMs, divided by the time they cover.
+    // Ring of the most recent motion reports of one gesture.
     //
-    // The tail (last report -> lift) is capped: a lift takes a few report
-    // intervals during which contact fades and no motion is reported; counting
-    // all of it launches every fast flick slower than the finger moved. Up to
-    // two caps of tail costs nothing; beyond that the fingers were hesitating
-    // and the launch fades linearly to zero at the window edge.
+    // Velocity at lift is the mean speed of the reports in the last windowMs
+    // *before the last report*: a flick accelerates through the whole gesture,
+    // and the finger's speed at the end is what the fling should continue.
+    //
+    // The tail (last report -> lift) is not part of that measurement. A lift
+    // takes a few report intervals during which contact fades and no motion is
+    // reported, even when the finger left at full speed (the largest report of
+    // a fast flick is usually the last one). Up to tailGraceMs of tail is
+    // therefore free; beyond it the fingers were hesitating, and the launch
+    // fades linearly to nothing at tailFadeMs.
     class CVelocityEstimator {
       public:
         static constexpr size_t CAP = 64;
@@ -79,33 +83,33 @@ namespace Physics {
             return m_lastMs;
         }
 
-        // tailCapMs == 0 selects the automatic cap: 1.5 report intervals,
-        // bounded to [8, 24] ms.
-        SLaunch launch(uint32_t liftMs, uint32_t windowMs, uint32_t tailCapMs, double multiplier) const {
+        SLaunch launch(uint32_t liftMs, uint32_t windowMs, uint32_t tailGraceMs, uint32_t tailFadeMs, double multiplier) const {
             SLaunch out;
             if (!m_hasLast)
                 return out;
 
-            const int32_t tailSigned = msDiff(liftMs, m_lastMs);
-            const uint32_t tail      = tailSigned > 0 ? static_cast<uint32_t>(tailSigned) : 0;
-            out.tailMs               = tail;
-            if (tail > windowMs)
+            const int32_t  tailSigned = msDiff(liftMs, m_lastMs);
+            const uint32_t tail       = tailSigned > 0 ? static_cast<uint32_t>(tailSigned) : 0;
+            out.tailMs                = tail;
+            if (tail >= tailFadeMs)
                 return out;
 
+            // Sum the reports inside the window, measured back from the last
+            // report. Always take at least two timed reports so a sparse device
+            // (gap larger than the window) still yields a velocity.
             double   sumV = 0.0, sumH = 0.0;
-            uint32_t sumDt = 0, lastDt = 0;
+            uint32_t sumDt = 0, timed = 0;
             for (size_t i = 0; i < m_count; ++i) {
                 const auto&   s   = m_s[(m_head + CAP - 1 - i) % CAP];
-                const int32_t age = msDiff(liftMs, s.t);
+                const int32_t age = msDiff(m_lastMs, s.t);
                 if (age < 0)
                     continue;
-                if (static_cast<uint32_t>(age) > windowMs)
+                if (static_cast<uint32_t>(age) > windowMs && timed >= 2)
                     break;
                 ++out.samples;
                 if (s.dt == 0)
                     continue; // first report of a gesture: covers unknown time
-                if (lastDt == 0)
-                    lastDt = s.dt;
+                ++timed;
                 sumV += s.dv;
                 sumH += s.dh;
                 sumDt += s.dt;
@@ -113,16 +117,12 @@ namespace Physics {
             if (sumDt == 0)
                 return out;
 
-            const uint32_t cap         = tailCapMs > 0 ? tailCapMs : std::clamp<uint32_t>(lastDt + lastDt / 2, 8, 24);
-            const uint32_t tailCounted = std::min(tail, cap);
-            const uint32_t grace       = 2 * cap;
-            const double   rest        = (tail <= grace || windowMs <= grace) ? 1.0 : 1.0 - static_cast<double>(tail - grace) / static_cast<double>(windowMs - grace);
-            const double   span        = static_cast<double>(sumDt + tailCounted);
+            const double rest = (tail <= tailGraceMs || tailFadeMs <= tailGraceMs) ? 1.0 : 1.0 - static_cast<double>(tail - tailGraceMs) / static_cast<double>(tailFadeMs - tailGraceMs);
 
-            out.capMs  = cap;
-            out.spanMs = span;
-            out.v      = sumV / span * rest * multiplier;
-            out.h      = sumH / span * rest * multiplier;
+            out.rest   = rest;
+            out.spanMs = static_cast<double>(sumDt);
+            out.v      = sumV / static_cast<double>(sumDt) * rest * multiplier;
+            out.h      = sumH / static_cast<double>(sumDt) * rest * multiplier;
             return out;
         }
 

@@ -79,7 +79,8 @@ class KineticState {
         CConfigValue<Config::INTEGER> intervalMs{"plugin:kinetic-scroll:interval_ms"};
         CConfigValue<Config::FLOAT>   deltaMultiplier{"plugin:kinetic-scroll:delta_multiplier"};
         CConfigValue<Config::INTEGER> velocityWindowMs{"plugin:kinetic-scroll:velocity_window_ms"};
-        CConfigValue<Config::INTEGER> liftTailCapMs{"plugin:kinetic-scroll:lift_tail_cap_ms"};
+        CConfigValue<Config::INTEGER> liftTailGraceMs{"plugin:kinetic-scroll:lift_tail_grace_ms"};
+        CConfigValue<Config::INTEGER> liftTailFadeMs{"plugin:kinetic-scroll:lift_tail_fade_ms"};
         CConfigValue<Config::INTEGER> disableInBrowser{"plugin:kinetic-scroll:disable_in_browser"};
         CConfigValue<Config::INTEGER> stopOnTargetChange{"plugin:kinetic-scroll:stop_on_target_change"};
         CConfigValue<Config::STRING>  disabledClasses{"plugin:kinetic-scroll:disabled_classes"};
@@ -119,8 +120,9 @@ class KineticState {
         Physics::SDecay        decay;
         double                 minVelPerMs      = 0.0;
         double                 launchMultiplier = 1.0;
-        uint32_t               windowMs         = 64;
-        uint32_t               tailCapMs        = 0; // 0 = auto
+        uint32_t               windowMs         = 32;
+        uint32_t               tailGraceMs      = 28;
+        uint32_t               tailFadeMs       = 80;
         int                    intervalMs       = 16;
     };
 
