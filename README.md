@@ -34,6 +34,17 @@ Releases: https://github.com/savonovv/hypr-kinetic-scroll/releases
 make
 ```
 
+## Make targets
+
+```bash
+make            # build hypr-kinetic-scroll.so
+make reinstall  # hyprpm remove + add + enable from REPO (default: this fork); asks for sudo
+make reload     # unload dev builds, then hyprpm reload -n
+make update     # hyprpm update (rebuild after a Hyprland update)
+make dev-load   # build and hot-load into the running Hyprland from a fresh /tmp path
+make unload-all # unload every loaded copy
+```
+
 ## Install via hyprpm (build locally)
 
 This is the safest way to get a matching binary for your Hyprland version:
