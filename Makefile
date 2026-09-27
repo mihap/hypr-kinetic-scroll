@@ -4,7 +4,12 @@ CXXFLAGS ?= -O2
 CXXFLAGS += -shared -fPIC -std=c++2b -g
 LDFLAGS ?=
 
-PKG_CONFIG = pkg-config --cflags pixman-1 libdrm hyprland pangocairo libinput libudev wayland-server xkbcommon
+PKG_CONFIG = pkg-config --cflags pixman-1 libdrm hyprland pangocairo libinput libudev wayland-server xkbcommon libeis-1.0
+
+# Development only: load a build into a Hyprland it was not built against.
+ifdef SKIP_VERSION_CHECK
+CXXFLAGS += -DKINETIC_SKIP_VERSION_CHECK
+endif
 
 SRC = main.cpp kinetic.cpp metrics.cpp
 OUT = $(PLUGIN_NAME).so

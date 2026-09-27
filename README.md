@@ -11,7 +11,7 @@ Releases: https://github.com/savonovv/hypr-kinetic-scroll/releases
 
 ## Features
 
-- Touchpad-only inertia (ignores real mouse wheels)
+- Touchpad-only inertia (ignores real mouse wheels); stays out of the way while input is captured (input-capture protocol)
 - Exponential velocity smoothing with configurable decay
 - Momentum starts only after fingers leave the touchpad
 - Touching the touchpad again stops active momentum
@@ -189,8 +189,9 @@ This log shows incoming axis events, timing, and state transitions.
 
 - Some touchpads report scrolls as `mouse` events with smooth deltas. The plugin
   treats `mouse=1` with `deltaDiscrete=0` as eligible touchpad input.
-- If you see a version mismatch error when loading, rebuild against the running
-  Hyprland headers, or temporarily disable strict version checks (if applicable).
+- The plugin refuses to load into a Hyprland it was not built against (ABI
+  guard; a notification names both versions). Rebuild with `make update` (hyprpm)
+  or `make`. `make SKIP_VERSION_CHECK=1` bypasses the guard for development only.
 
 ## License
 

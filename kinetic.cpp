@@ -5,6 +5,7 @@
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/protocols/InputCapture.hpp>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -22,9 +23,14 @@ const char* stopName(eStop s) {
         case eStop::MOUSE_BUTTON: return "mouseButton";
         case eStop::ACTIVE_WINDOW: return "activeWindow";
         case eStop::RULE_DISABLED: return "ruleDisabled";
+        case eStop::CAPTURED: return "captured";
         case eStop::UNLOAD: return "unload";
     }
     return "?";
+}
+
+static bool inputCaptured() {
+    return PROTO::inputCapture && PROTO::inputCapture->isCaptured();
 }
 
 // ---------------------------------------------------------------------------
@@ -89,12 +95,12 @@ void KineticState::resetAppRules() {
 }
 
 // ---------------------------------------------------------------------------
-// Construction, timer, touchpads
+// Construction, timer, devices
 
 KineticState::KineticState() {
     m_timer = wl_event_loop_add_timer(g_pCompositor->m_wlEventLoop, onTimer, this);
     Metrics::g_metrics.setLoop(g_pCompositor->m_wlEventLoop);
-    rescanTouchpads();
+    rescanDevices();
 }
 
 KineticState::~KineticState() {
@@ -107,41 +113,48 @@ KineticState::~KineticState() {
         wl_event_source_remove(m_timer);
 }
 
-// True if a touchpad appeared, vanished, or was replaced since the last scan.
-// Compares device identity (weak pointers), not the device count.
-bool KineticState::touchpadsStale() const {
+// True if a pointer device appeared, vanished, or was replaced since the last
+// scan. Compares device identity (weak pointers), not the device count.
+bool KineticState::devicesStale() const {
     if (!g_pInputManager)
         return false;
-    for (const auto& wp : m_touchpads)
+    for (const auto& wp : m_devices)
         if (wp.expired())
             return true;
     size_t seen = 0;
     for (const auto& pointer : g_pInputManager->m_pointers) {
-        if (!pointer || !pointer->m_isTouchpad)
+        if (!pointer)
             continue;
         ++seen;
-        if (std::ranges::none_of(m_touchpads, [&](const auto& wp) { return wp == pointer; }))
+        if (std::ranges::none_of(m_devices, [&](const auto& wp) { return wp == pointer; }))
             return true;
     }
-    return seen != m_touchpads.size();
+    return seen != m_devices.size();
 }
 
-// Listen on every touchpad for contact (motion / hold begin) and frame events.
-void KineticState::rescanTouchpads() {
+// Every pointer device: remember which one scrolled last (the bus axis event
+// carries no device; this listener runs after Hyprland's dispatch of the same
+// event, so it is current from the second report of a gesture on). Touchpads
+// additionally: contact (motion / hold begin) cancels momentum.
+void KineticState::rescanDevices() {
     if (!g_pInputManager)
         return;
 
-    m_touchpadListeners.clear();
-    m_touchpads.clear();
+    m_deviceListeners.clear();
+    m_devices.clear();
 
     for (const auto& pointer : g_pInputManager->m_pointers) {
-        if (!pointer || !pointer->m_isTouchpad)
+        if (!pointer)
             continue;
 
-        m_touchpads.emplace_back(pointer);
-        m_touchpadListeners.emplace_back(pointer->m_pointerEvents.frame.listen([this] { onPointerFrame(); }));
-        m_touchpadListeners.emplace_back(pointer->m_pointerEvents.motion.listen([this](const IPointer::SMotionEvent&) { onTouchpadContact(); }));
-        m_touchpadListeners.emplace_back(pointer->m_pointerEvents.holdBegin.listen([this](const IPointer::SHoldBeginEvent&) { onTouchpadContact(); }));
+        m_devices.emplace_back(pointer);
+        WP<IPointer> wp = pointer;
+        m_deviceListeners.emplace_back(pointer->m_pointerEvents.axis.listen([this, wp](const IPointer::SAxisEvent&) { m_lastAxisDevice = wp; }));
+
+        if (!pointer->m_isTouchpad)
+            continue;
+        m_deviceListeners.emplace_back(pointer->m_pointerEvents.motion.listen([this](const IPointer::SMotionEvent&) { onTouchpadContact(); }));
+        m_deviceListeners.emplace_back(pointer->m_pointerEvents.holdBegin.listen([this](const IPointer::SHoldBeginEvent&) { onTouchpadContact(); }));
     }
 }
 
@@ -159,12 +172,12 @@ int KineticState::onTimer(void* data) {
         case eState::IDLE: break;
         case eState::IGNORED:
             // Long enough without a stop event: whatever that was, it is over.
-            self->resetGesture();
+            self->resetGesture(false);
             break;
         case eState::TRACKING:
             if (self->m_timerLaunches) {
-                // Smooth mouse (no stop event) or a device that ended the
-                // sequence with an axis-less frame: silence means lifted.
+                // Smooth mouse only: no stop event exists, silence is the lift.
+                // (Touchpad gestures launch solely on libinput's real stop.)
                 if (Metrics::g_metrics.enabled())
                     Metrics::g_metrics.gesture().tLift = Metrics::nowNs();
                 self->launch(self->m_est.lastMs(), "timeout");
@@ -206,35 +219,34 @@ KineticState::eTarget KineticState::targetState() const {
 // Gesture start
 
 bool KineticState::beginGesture(const IPointer::SAxisEvent& e, bool touchpadSource) {
-    if (touchpadsStale())
-        rescanTouchpads();
+    if (devicesStale())
+        rescanDevices();
 
     m_g          = {};
     m_g.touchpad = touchpadSource;
     m_g.source   = touchpadSource ? e.source : WL_POINTER_AXIS_SOURCE_CONTINUOUS;
     m_g.debug    = *m_cfg.debug != 0;
 
-    const auto PWIN = g_pInputManager ? g_pInputManager->m_lastMouseFocus.lock() : nullptr;
-    if (PWIN && !windowAllowed(PWIN->m_class)) {
+    const auto PWIN  = g_pInputManager ? g_pInputManager->m_lastMouseFocus.lock() : nullptr;
+    const auto PSURF = g_pSeatManager ? g_pSeatManager->m_state.pointerFocus.lock() : nullptr;
+
+    // Nothing to own without a surface: momentum would land on whatever the
+    // pointer enters next. A window rule can also exclude the gesture.
+    if (!PSURF || (PWIN && !windowAllowed(PWIN->m_class))) {
         m_state = eState::IGNORED;
         wl_event_source_timer_update(m_timer, 500);
         return false;
     }
 
     // Snapshot everything the momentum phase needs.
-    m_g.scrollFactor = *m_cfg.touchpadScrollFactor;
+    m_g.surface    = PSURF;
+    m_g.hadSurface = true;
     if (PWIN) {
         m_g.window    = PWIN;
         m_g.hadWindow = true;
         m_g.monitor   = PWIN->m_monitor;
-        if (PWIN->isScrollTouchpadOverridden())
-            m_g.scrollFactor = PWIN->getScrollTouchpad();
         if (const auto MON = PWIN->m_monitor.lock(); MON && MON->m_refreshRate > 1.0f)
             m_g.frameMs = 1000.0 / MON->m_refreshRate;
-    }
-    if (g_pSeatManager && g_pSeatManager->m_state.pointerFocus) {
-        m_g.surface    = g_pSeatManager->m_state.pointerFocus;
-        m_g.hadSurface = true;
     }
 
     m_g.stopOnTargetChange = *m_cfg.stopOnTargetChange != 0;
@@ -244,12 +256,12 @@ bool KineticState::beginGesture(const IPointer::SAxisEvent& e, bool touchpadSour
     m_g.tailFadeMs         = std::max<int64_t>(m_g.tailGraceMs + 1, *m_cfg.liftTailFadeMs);
     m_g.launchMultiplier   = *m_cfg.deltaMultiplier;
     m_g.decay              = Physics::SDecay::fromDecelPer16ms(*m_cfg.decel);
-    // min_velocity is in scroll units per 16 ms, comparable to real deltas.
-    m_g.minVelPerMs = *m_cfg.minVelocity / 16.0;
+    // min_velocity is in scroll units per 16 ms, comparable to real deltas. A
+    // zero cutoff would let a zero-velocity fling run forever: floor it.
+    m_g.minVelPerMs = std::max(1e-4, static_cast<double>(*m_cfg.minVelocity) / 16.0);
 
     m_est.reset();
-    m_owedStops = 0;
-    m_state     = eState::TRACKING;
+    m_state = eState::TRACKING;
 
     // Metrics sink is re-read once per gesture (string copy); hot paths only
     // test the cached bool.
@@ -263,15 +275,16 @@ bool KineticState::beginGesture(const IPointer::SAxisEvent& e, bool touchpadSour
     return true;
 }
 
-void KineticState::resetGesture() {
+void KineticState::resetGesture(bool keepOwedStops) {
     m_state             = eState::IDLE;
-    m_axisInFrame       = false;
     m_timerLaunches     = false;
     m_velocityV         = 0.0;
     m_velocityH         = 0.0;
-    m_owedStops         = 0;
-    m_lastEmitSurface.reset();
     m_lastStepFromTimer = false;
+    if (!keepOwedStops) {
+        m_owedStops = 0;
+        m_lastEmitSurface.reset();
+    }
     m_est.reset();
     m_g = {};
     wl_event_source_timer_update(m_timer, 0);
@@ -298,8 +311,18 @@ bool KineticState::onAxis(IPointer::SAxisEvent& e) {
         }
     } axisScope{this, Metrics::g_metrics.enabled() ? Metrics::nowNs() : 0, Metrics::g_metrics.flushNsTotal()};
 
-    if (!*m_cfg.enabled)
+    // Disabled, or the seat's input is captured (input-capture protocol):
+    // nothing is ours. Close whatever we owned; let everything pass.
+    if (!*m_cfg.enabled) {
+        if (m_state != eState::IDLE)
+            stopKinetic(eStop::RULE_DISABLED);
         return false;
+    }
+    if (inputCaptured()) {
+        if (m_state != eState::IDLE)
+            stopKinetic(eStop::CAPTURED);
+        return false;
+    }
 
     // Touchpad scrolling, plus mice that report smooth-only deltas.
     const bool touchpadSource = e.source == WL_POINTER_AXIS_SOURCE_FINGER || e.source == WL_POINTER_AXIS_SOURCE_CONTINUOUS;
@@ -313,7 +336,7 @@ bool KineticState::onAxis(IPointer::SAxisEvent& e) {
     switch (m_state) {
         case eState::IGNORED:
             if (isStop)
-                resetGesture();
+                resetGesture(false);
             return false;
 
         case eState::DECAYING:
@@ -329,13 +352,18 @@ bool KineticState::onAxis(IPointer::SAxisEvent& e) {
                 return true;
             }
             // Fingers back on the pad and moving: the new swipe takes over.
-            // The client's gesture simply continues with these real events.
+            // The client's gesture simply continues with these real events;
+            // the stops we owe carry over to the new gesture.
             stopKinetic(eStop::NEW_GESTURE);
             [[fallthrough]];
 
         case eState::IDLE:
-            if (isStop)
+            if (isStop) {
+                // A stray stop while idle (e.g. the previous gesture handed
+                // off but never launched): close what is still owed.
+                sendOwedStops();
                 return false;
+            }
             if (!beginGesture(e, touchpadSource))
                 return false;
             break;
@@ -360,8 +388,8 @@ bool KineticState::onAxis(IPointer::SAxisEvent& e) {
             return false;
         // libinput's axis_stop: fingers left the pad. Launch synchronously; any
         // wait here is a visible hitch. If nothing launches (pause before lift,
-        // below threshold) the real stop passes through.
-        m_axisInFrame = true;
+        // below threshold) the real stop passes through, and any stop still
+        // owed from a hand-off is delivered alongside it.
         if (Metrics::g_metrics.enabled())
             Metrics::g_metrics.gesture().tLift = Metrics::nowNs();
         if (!launch(e.timeMs, "axisStop"))
@@ -375,34 +403,17 @@ bool KineticState::onAxis(IPointer::SAxisEvent& e) {
     if (touchpadSource != m_g.touchpad)
         return false; // mixed devices mid-gesture: not ours
 
-    m_axisInFrame = m_g.touchpad;
     m_est.add(e.timeMs, e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL, e.delta);
     if (Metrics::g_metrics.enabled() && Metrics::g_metrics.active())
         Metrics::g_metrics.addSample(e.timeMs, e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? e.delta : 0.0, e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? 0.0 : e.delta);
 
     // Touchpad: idle safety only. Fingers resting this long end the gesture, so
-    // a later lift launches nothing (the velocity window already yields ~0 for
-    // a pause; this covers a missing stop event). Smooth mouse: no stop event
+    // a later lift launches nothing (the velocity fade already yields ~0 for a
+    // pause; this covers a missing stop event). Smooth mouse: no stop event
     // exists, so a short silence means "lifted".
     m_timerLaunches = !m_g.touchpad;
     wl_event_source_timer_update(m_timer, m_g.touchpad ? 200 : 50);
     return false;
-}
-
-void KineticState::onPointerFrame() {
-    if (m_axisInFrame) {
-        m_axisInFrame = false;
-        return;
-    }
-
-    if (m_state != eState::TRACKING || !m_g.touchpad)
-        return;
-
-    // Fallback only: the lift is normally handled synchronously from the
-    // zero-delta axis event. If a device ends a sequence with an axis-less
-    // frame and no stop event, launch after a short grace period.
-    m_timerLaunches = true;
-    wl_event_source_timer_update(m_timer, 100);
 }
 
 void KineticState::onTouchpadContact() {
@@ -412,6 +423,26 @@ void KineticState::onTouchpadContact() {
 
 // ---------------------------------------------------------------------------
 // Launch
+
+// Mirror of Hyprland's factor selection in CInputManager::onMouseWheel:
+// touchpad factor for finger scrolls (or whenever it is <= 0), else the mouse
+// factor; a per-device factor overrides that; a window rule overrides both.
+double KineticState::resolveScrollFactor() const {
+    const float touchpadFactor  = *m_cfg.touchpadScrollFactor;
+    const bool  isTouchpadScroll = touchpadFactor <= 0.f || m_g.source == WL_POINTER_AXIS_SOURCE_FINGER;
+    double      factor           = isTouchpadScroll ? touchpadFactor : *m_cfg.mouseScrollFactor;
+
+    if (const auto DEV = m_lastAxisDevice.lock(); DEV && DEV->m_scrollFactor.has_value())
+        factor = *DEV->m_scrollFactor;
+
+    if (const auto PWIN = m_g.window.lock()) {
+        if (!isTouchpadScroll && PWIN->isScrollMouseOverridden())
+            factor = PWIN->getScrollMouse();
+        else if (isTouchpadScroll && PWIN->isScrollTouchpadOverridden())
+            factor = PWIN->getScrollTouchpad();
+    }
+    return factor;
+}
 
 bool KineticState::launch(uint32_t liftMs, const char* how) {
     if (m_state != eState::TRACKING)
@@ -432,11 +463,12 @@ bool KineticState::launch(uint32_t liftMs, const char* how) {
         *lg << "[hypr-kinetic-scroll] launch(" << how << ") v=" << l.v << "/ms h=" << l.h << "/ms span=" << l.spanMs << "ms tail=" << l.tailMs << " rest=" << l.rest
             << " samples=" << l.samples << "\n";
 
-    if (std::abs(m_velocityV) < m_g.minVelPerMs && std::abs(m_velocityH) < m_g.minVelPerMs) {
+    if (std::abs(m_velocityV) <= m_g.minVelPerMs && std::abs(m_velocityH) <= m_g.minVelPerMs) {
         stopKinetic(eStop::BELOW_THRESHOLD);
         return false;
     }
 
+    m_g.scrollFactor    = resolveScrollFactor();
     m_state             = eState::DECAYING;
     m_lastTick          = std::chrono::steady_clock::now();
     m_lastStepFromTimer = false;
@@ -475,6 +507,12 @@ void KineticState::onRenderPre(PHLMONITOR mon) {
 void KineticState::step(bool fromRender) {
     Metrics::CScope stepScope(Metrics::g_metrics.enabled() ? &Metrics::g_metrics.gesture().stepNs : nullptr);
 
+    if (inputCaptured()) {
+        stepScope.retarget(nullptr);
+        stopKinetic(eStop::CAPTURED);
+        return;
+    }
+
     switch (targetState()) {
         case eTarget::DESTROYED:
             // The client we owe a stop is gone; nothing to deliver, nothing to scroll.
@@ -489,7 +527,7 @@ void KineticState::step(bool fromRender) {
             }
             break;
         case eTarget::SAME:
-        case eTarget::NONE: break;
+        case eTarget::NONE: break; // NONE cannot launch (beginGesture requires a surface)
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -525,7 +563,7 @@ void KineticState::step(bool fromRender) {
     if (auto* l = log())
         *l << "[hypr-kinetic-scroll] step src=" << (fromRender ? "render" : "timer") << " dt=" << dt << " dV=" << deltaV << " v=" << m_velocityV << "\n";
 
-    if (std::abs(m_velocityV) < m_g.minVelPerMs && std::abs(m_velocityH) < m_g.minVelPerMs) {
+    if (std::abs(m_velocityV) <= m_g.minVelPerMs && std::abs(m_velocityH) <= m_g.minVelPerMs) {
         stepScope.retarget(nullptr); // gesture is finalized inside stopKinetic
         stopKinetic(eStop::DECAY_DONE);
         return;
@@ -553,10 +591,15 @@ void KineticState::emitSyntheticScroll(double deltaV, double deltaH, uint32_t ti
     m_lastEmitSurface = g_pSeatManager->m_state.pointerFocus;
 
     // Same axis source as the finger phase, so the client sees one gesture.
-    if (deltaV != 0.0)
+    // Every axis we emit on is a sequence we must close.
+    if (deltaV != 0.0) {
+        m_owedStops |= 1;
         g_pSeatManager->sendPointerAxis(timeMs, WL_POINTER_AXIS_VERTICAL_SCROLL, deltaV * m_g.scrollFactor, 0, 0, m_g.source, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
-    if (deltaH != 0.0)
+    }
+    if (deltaH != 0.0) {
+        m_owedStops |= 2;
         g_pSeatManager->sendPointerAxis(timeMs, WL_POINTER_AXIS_HORIZONTAL_SCROLL, deltaH * m_g.scrollFactor, 0, 0, m_g.source, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+    }
 
     g_pSeatManager->sendPointerFrame();
 }
@@ -571,12 +614,16 @@ void KineticState::sendOwedStops() {
     if (!m_owedStops || !g_pSeatManager)
         return;
     const auto& focus = g_pSeatManager->m_state.pointerFocus;
-    if (!focus)
+    if (!focus) {
+        m_owedStops = 0;
         return;
+    }
     const bool isGestureSurface = m_g.hadSurface && !m_g.surface.expired() && focus == m_g.surface;
     const bool isEmitSurface    = !m_lastEmitSurface.expired() && focus == m_lastEmitSurface;
-    if (!isGestureSurface && !isEmitSurface)
+    if (!isGestureSurface && !isEmitSurface) {
+        m_owedStops = 0; // undeliverable: that client got pointer.leave
         return;
+    }
 
     const auto     now    = std::chrono::steady_clock::now();
     const uint32_t timeMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
@@ -589,8 +636,9 @@ void KineticState::sendOwedStops() {
     g_pSeatManager->sendPointerFrame();
 
     if (Metrics::g_metrics.enabled())
-        Metrics::g_metrics.gesture().stopsSent = (m_owedStops & 1 ? 1 : 0) + (m_owedStops & 2 ? 1 : 0);
+        Metrics::g_metrics.gesture().stopsSent += (m_owedStops & 1 ? 1 : 0) + (m_owedStops & 2 ? 1 : 0);
     m_owedStops = 0;
+    m_lastEmitSurface.reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -602,18 +650,20 @@ void KineticState::stopKinetic(eStop reason) {
 
     // Close the gesture for the client if we swallowed its finger lift, unless
     // the client's gesture simply continues with the real events that caused
-    // this stop (fingers back down and moving: a re-touch, as on macOS).
-    if (!clientGestureContinues(reason))
+    // this stop (fingers back down and moving: a re-touch, as on macOS). In
+    // that case the debt carries over and is settled when that gesture ends.
+    const bool carryOver = clientGestureContinues(reason);
+    if (!carryOver)
         sendOwedStops();
 
     if (auto* l = log())
         *l << "[hypr-kinetic-scroll] stop reason=" << stopName(reason) << " owedLeft=" << int(m_owedStops) << "\n";
 
     if (Metrics::g_metrics.enabled()) {
-        auto& g       = Metrics::g_metrics.gesture();
-        g.stopsOwed   = (m_owedStops & 1 ? 1 : 0) + (m_owedStops & 2 ? 1 : 0); // still owed after this stop (0 unless undeliverable / continued)
-        g.stopReason  = stopName(reason);
+        auto& g      = Metrics::g_metrics.gesture();
+        g.stopsOwed  = (m_owedStops & 1 ? 1 : 0) + (m_owedStops & 2 ? 1 : 0); // carried over (hand-off) or undeliverable
+        g.stopReason = stopName(reason);
     }
     Metrics::g_metrics.gestureEnd(Metrics::nowNs());
-    resetGesture();
+    resetGesture(carryOver);
 }

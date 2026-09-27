@@ -22,14 +22,15 @@
 //                       │                          │
 //                       └── pause/idle ──▶ IDLE    └── touch / new swipe / target change ──▶ IDLE
 //
-// IGNORED is TRACKING's twin for gestures over windows where the plugin is
-// disabled: nothing is measured or emitted until that gesture ends.
+// IGNORED is TRACKING's twin for gestures the plugin leaves alone (window
+// rule, no pointer focus): nothing is measured or emitted until they end.
 //
 // While DECAYING the plugin *owns* the gesture: the client never sees the real
 // finger lift, receives one synthetic scroll per compositor frame with the
 // same axis source as the finger phase, and gets an axis_stop from us when
-// momentum ends. Which axes are owed a stop is tracked separately from which
-// axes still have velocity.
+// momentum ends. The stops we owe (per axis: every axis whose real stop we
+// swallowed or on which we emitted) are tracked separately from velocity and
+// survive a re-touch hand-off, so every opened axis sequence gets closed.
 //
 // Physics (velocity estimate, decay integral) lives in physics.hpp; this class
 // is the adapter to Hyprland: events, focus, timers, frames, config.
@@ -46,7 +47,8 @@ enum class eStop : uint8_t {
     TARGET_DESTROYED, // the target window/surface went away
     MOUSE_BUTTON,
     ACTIVE_WINDOW,
-    RULE_DISABLED,
+    RULE_DISABLED,    // plugin disabled while a gesture was live
+    CAPTURED,         // input capture took the seat's input
     UNLOAD,
 };
 const char* stopName(eStop s);
@@ -61,7 +63,6 @@ class KineticState {
 
     // Returns true if the event must be cancelled (not delivered to the client).
     bool onAxis(IPointer::SAxisEvent& e);
-    void onPointerFrame();
     void onTouchpadContact();
     void onRenderPre(PHLMONITOR mon);
     void stopKinetic(eStop reason);
@@ -89,6 +90,7 @@ class KineticState {
         CConfigValue<Config::INTEGER> stopOnFocus{"plugin:kinetic-scroll:stop_on_focus"};
         CConfigValue<Config::STRING>  metricsFile{"plugin:kinetic-scroll:metrics_file"};
         CConfigValue<Config::FLOAT>   touchpadScrollFactor{"input:touchpad:scroll_factor"};
+        CConfigValue<Config::FLOAT>   mouseScrollFactor{"input:scroll_factor"};
     };
     const SConfig& config() const {
         return m_cfg;
@@ -97,7 +99,7 @@ class KineticState {
   private:
     enum class eState : uint8_t {
         IDLE,
-        IGNORED,  // a gesture is in progress over a window we leave alone
+        IGNORED,  // a gesture is in progress that we leave alone
         TRACKING, // fingers down, collecting samples
         DECAYING, // momentum running
     };
@@ -112,7 +114,7 @@ class KineticState {
         bool                   hadSurface = false;
         PHLMONITORREF          monitor;
         double                 frameMs            = 1000.0 / 60.0;
-        double                 scrollFactor       = 1.0;
+        double                 scrollFactor       = 1.0; // resolved at launch (device known by then)
         wl_pointer_axis_source source             = WL_POINTER_AXIS_SOURCE_FINGER;
         bool                   touchpad           = true; // false: smooth mouse, no stop events
         bool                   stopOnTargetChange = true;
@@ -131,22 +133,22 @@ class KineticState {
     bool          beginGesture(const IPointer::SAxisEvent& e, bool touchpadSource);
     eTarget       targetState() const;
     bool          launch(uint32_t liftMs, const char* how);
+    double        resolveScrollFactor() const;
     void          step(bool fromRender);
     void          emitSyntheticScroll(double deltaV, double deltaH, uint32_t timeMs);
     void          sendOwedStops();
-    void          resetGesture();
-    bool          touchpadsStale() const;
-    void          rescanTouchpads();
+    void          resetGesture(bool keepOwedStops);
+    bool          devicesStale() const;
+    void          rescanDevices();
     bool          windowAllowed(const std::string& cls) const;
     std::ostream* log();
 
-    SConfig                    m_cfg;
-    eState                     m_state = eState::IDLE;
-    SGestureCtx                m_g;
+    SConfig                     m_cfg;
+    eState                      m_state = eState::IDLE;
+    SGestureCtx                 m_g;
     Physics::CVelocityEstimator m_est;
 
-    bool                       m_axisInFrame   = false;
-    bool                       m_timerLaunches = false; // TRACKING timer: launch (true) or abandon (false)
+    bool m_timerLaunches = false; // TRACKING timer: launch (true) or abandon (false)
 
     // Momentum. Velocities in scroll units per ms.
     double                                m_velocityV = 0.0;
@@ -154,16 +156,17 @@ class KineticState {
     std::chrono::steady_clock::time_point m_lastTick;
     bool                                  m_lastStepFromTimer = false;
 
-    // Protocol ownership: bit 0 = vertical, bit 1 = horizontal axis whose real
-    // axis_stop we swallowed and therefore owe the client. The stops go to the
-    // surface that last received our synthetic scroll (normally the gesture's
-    // surface; with stop_on_target_change = 0 it may be a newer focus).
+    // Protocol ownership: bit 0 = vertical, bit 1 = horizontal axis on which
+    // the client has an open scroll sequence that we must close: its real
+    // axis_stop was swallowed, or we emitted on it. Delivered to the surface
+    // that last received our synthetic scroll (normally the gesture's surface).
     uint8_t                m_owedStops = 0;
     WP<CWLSurfaceResource> m_lastEmitSurface;
 
     wl_event_source*                                    m_timer = nullptr;
-    std::vector<WP<IPointer>>                           m_touchpads;
-    std::vector<Hyprutils::Signal::CHyprSignalListener> m_touchpadListeners;
+    std::vector<WP<IPointer>>                           m_devices; // every pointer device we listen on
+    std::vector<Hyprutils::Signal::CHyprSignalListener> m_deviceListeners;
+    WP<IPointer>                                        m_lastAxisDevice; // device of the most recent axis event
 
     std::unordered_map<std::string, bool> m_perAppRules;
     bool                                  m_defaultAppRule = true;

@@ -154,10 +154,19 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     PHANDLE = handle;
 
-    // NOTE: version check skipped for local dev (headers v0.53.3, running v0.53.1).
-    // Re-enable for distribution:
-    // if (__hyprland_api_get_hash() != __hyprland_api_get_client_hash())
-    //     throw std::runtime_error("Version mismatch");
+    // ABI guard: this plugin reads Hyprland's internal C++ objects, so the
+    // build must match the running compositor. hyprpm always builds against
+    // matching headers. Bypass only for development: make SKIP_VERSION_CHECK=1
+#ifndef KINETIC_SKIP_VERSION_CHECK
+    {
+        const std::string SERVER = __hyprland_api_get_hash();
+        const std::string CLIENT = __hyprland_api_get_client_hash();
+        if (SERVER != CLIENT) {
+            HyprlandAPI::addNotification(PHANDLE, "[hypr-kinetic-scroll] built for Hyprland " + CLIENT + ", running " + SERVER + ": not loading", CHyprColor{1.0, 0.2, 0.2, 1.0}, 8000);
+            throw std::runtime_error("[hypr-kinetic-scroll] version mismatch (built " + CLIENT + ", running " + SERVER + ")");
+        }
+    }
+#endif
 
     registerConfigValues();
 
