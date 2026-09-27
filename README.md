@@ -1,197 +1,192 @@
 # hypr-kinetic-scroll
 
-Hyprland compositor plugin that adds kinetic (inertial) scrolling for touchpads
-at the compositor level, so momentum scrolling works consistently across apps
-(not just in browsers).
+Momentum ("kinetic", "inertial") scrolling for touchpads, implemented inside
+the Hyprland compositor so it works the same in every application, terminal
+included, not only in browsers that fling on their own.
 
-Prebuilt binaries are tied to a specific Hyprland version/ABI. If you’re not on
-the same version, install via hyprpm (build locally) instead.
+Flick, and the content keeps moving at the speed your finger had when it left
+the pad, one step per display frame, slowing along a time-based curve close to
+macOS. Touch the pad and it stops. Swipe again and the new swipe takes over.
 
-Releases: https://github.com/savonovv/hypr-kinetic-scroll/releases
+Fork of [savonovv/hypr-kinetic-scroll](https://github.com/savonovv/hypr-kinetic-scroll)
+with rewritten physics, gesture ownership, and a measured core.
 
-## Features
+## How it works
 
-- Touchpad-only inertia (ignores real mouse wheels); stays out of the way while input is captured (input-capture protocol)
-- Exponential velocity smoothing with configurable decay
-- Momentum starts only after fingers leave the touchpad
-- Touching the touchpad again stops active momentum
-- Owns the gesture: the client never sees the finger lift while momentum runs (no double fling in GTK4/Chromium), momentum uses the finger axis source, and the plugin sends the axis_stop when momentum ends
-- Momentum is emitted in lockstep with the target monitor's frames; a frame is scheduled at launch so there is no hitch at lift
-- Window policy (rules, disabled classes, browser heuristic) is evaluated once per gesture, at its start
-- Synthetic scroll emission via Hyprland seat manager
-- Configurable thresholds and frame interval
-- Per-app enable/disable rules with exact class matching
+- **Launch on the real lift.** Momentum starts synchronously on libinput's
+  finger-lift event. No timers, no hitch.
+- **Launch at the finger's end speed.** The velocity is the mean speed of the
+  touchpad reports in the last `velocity_window_ms` before the last report, so
+  a flick that accelerates to the end launches at its end speed, independent of
+  the pad's report rate. The motionless gap before the lift is lift mechanics
+  up to `lift_tail_grace_ms`; beyond that it is hesitation and the launch fades
+  to nothing at `lift_tail_fade_ms`, so "scroll, pause, lift" launches nothing.
+- **One step per frame.** Momentum is emitted from the compositor's render hook
+  for the monitor showing the target window, integrating an exponential decay
+  over the real elapsed time. Timer jitter changes neither speed nor distance.
+  A timer only steps in as a watchdog when no frame arrives.
+- **Owns the gesture.** While momentum runs the client never sees the finger
+  lift (delivered, GTK4 and Chromium would fling on top of ours), synthetic
+  events carry the finger axis source, and the plugin sends the `axis_stop` it
+  owes when momentum ends. Every opened axis sequence is closed, including
+  across a re-touch hand-off.
+- **Stops when it should.** Touchpad contact, a new swipe, the target window or
+  surface changing or going away, a mouse click or focus change (optional),
+  input capture, disabling, unload.
+- **Per-app policy** evaluated once at gesture start: explicit rules, a
+  disabled-class list, and a browser heuristic (browsers keep their native
+  fling by default). Scroll factors follow Hyprland's own precedence:
+  `input:touchpad:scroll_factor` / `input:scroll_factor`, per-device factor,
+  window rule (`scroll_touchpad` / `scroll_mouse`).
+- **Cheap.** Config is bound once; the hot paths cost a few microseconds per
+  event and per frame (see `bench/`).
 
-## Layout
+## Install
 
-- `physics.hpp`: launch-velocity estimator and decay integrator. No Hyprland
-  dependencies; replayable and unit-tested (`make test`).
-- `kinetic.cpp`: the compositor adapter (events, focus, timers, frames, config,
-  gesture ownership).
-- `metrics.*`: optional per-gesture instrumentation, see `bench/README.md`.
-
-## Requirements
-
-- Hyprland development headers
-- `pkg-config` dependencies for Hyprland
-- C++23-capable compiler
-
-## Build
+The plugin reads Hyprland's internal objects, so it must be built against the
+running Hyprland. hyprpm does that and rebuilds after updates:
 
 ```bash
-make
+hyprpm add https://github.com/mihap/hypr-kinetic-scroll
+hyprpm enable hypr-kinetic-scroll
+hyprpm reload -n
 ```
 
-## Make targets
+Or from a clone: `make reinstall` (same steps; asks for sudo), `make update`
+after a Hyprland update, `make reload` to load the installed build.
+
+A build refuses to load into a Hyprland it was not built against (ABI guard; a
+notification names both versions). Rebuild rather than bypass.
+
+### Requirements
+
+Hyprland headers (installed by hyprpm, or the `hyprland` package on Arch),
+their `pkg-config` dependencies including `libeis-1.0`, and a C++23 compiler.
+
+## Configuration
+
+Defaults are tuned for a macOS-like feel and need no changes. All options, with
+their defaults:
+
+```ini
+plugin:kinetic-scroll:enabled = 1
+plugin:kinetic-scroll:decel = 0.967            # velocity multiplier per 16 ms; lower = shorter fling
+plugin:kinetic-scroll:delta_multiplier = 1.0   # scales the launch velocity; 1.0 = the finger's own speed
+plugin:kinetic-scroll:min_velocity = 0.5       # scroll units per 16 ms; below it momentum stops / a lift launches nothing
+plugin:kinetic-scroll:velocity_window_ms = 32  # reports within this many ms before the last report set the launch speed
+plugin:kinetic-scroll:lift_tail_grace_ms = 28  # motionless ms before the lift that cost nothing
+plugin:kinetic-scroll:lift_tail_fade_ms = 80   # motionless ms before the lift at which the launch has faded to nothing
+plugin:kinetic-scroll:interval_ms = 16         # watchdog interval when no compositor frame arrives
+plugin:kinetic-scroll:disable_in_browser = 1   # browsers (firefox, chrom*, brave, vivaldi, opera, librewolf, zen) keep their own fling
+plugin:kinetic-scroll:stop_on_target_change = 1
+plugin:kinetic-scroll:disabled_classes =       # exact window classes, comma or space separated
+plugin:kinetic-scroll:stop_on_click = 0
+plugin:kinetic-scroll:stop_on_focus = 0
+plugin:kinetic-scroll:debug = 0                # log to /tmp/hypr-kinetic-scroll.log
+plugin:kinetic-scroll:metrics_file =           # per-gesture JSON metrics, see bench/README.md
+```
+
+### Lua configs (Omarchy and other `hyprland.lua` setups)
+
+Colons become nesting and dashes become underscores:
+
+```lua
+hl.config({
+  plugin = {
+    kinetic_scroll = {
+      decel = 0.967,
+      delta_multiplier = 1.0,
+    },
+  },
+})
+```
+
+The same form works at runtime for tuning:
+
+```bash
+hyprctl eval 'hl.config({ plugin = { kinetic_scroll = { decel = 0.975 } } })'
+```
+
+(`hyprctl keyword` does not work with Lua configs.)
+
+### Per-app rules
+
+Classes are exact matches; find them with `hyprctl clients`. An explicit rule
+wins over the disabled-class list and the browser heuristic.
+
+INI:
+
+```ini
+plugin:kinetic-scroll:disabled_classes = org.telegram.desktop, steam
+```
+
+Lua:
+
+```lua
+hl.plugin.kinetic_scroll.disable("org.telegram.desktop")
+hl.plugin.kinetic_scroll.enable("firefox")          -- override the browser heuristic
+
+hl.plugin.kinetic_scroll.disable_default()          -- allow-list mode
+hl.plugin.kinetic_scroll.enable("com.mitchellh.ghostty")
+
+hl.plugin.kinetic_scroll.enable_default()
+hl.plugin.kinetic_scroll.reset_rules()
+```
+
+Legacy INI keyword: `kinetic-scroll-rule disable firefox` / `enable firefox`.
+
+## Verify
+
+1. `hyprctl plugin list` shows `hypr-kinetic-scroll`.
+2. Two-finger flick and lift: the content keeps moving and slows down.
+3. Touch the pad during momentum: it stops at once.
+4. Scroll, hold the fingers still for half a second, lift: nothing moves.
+5. Flick during momentum: the new flick takes over without a jump.
+
+## Measuring
+
+`metrics_file` records one JSON line per gesture: hot-path cost, lift-to-first-
+emit latency, frame cadence, launch velocity, travel, and gesture-ownership
+counters. `bench/analyze.py` compares runs; `bench/scrollback.txt` is a
+deterministic fixture. Protocol and how to read the numbers: `bench/README.md`.
+
+## Development
 
 ```bash
 make            # build hypr-kinetic-scroll.so
 make test       # compositor-free physics tests (tests/physics_test.cpp)
-make reinstall  # hyprpm remove + add + enable from REPO (default: this fork); asks for sudo
-make reload     # unload dev builds, then hyprpm reload -n
-make update     # hyprpm update (rebuild after a Hyprland update)
 make dev-load   # build and hot-load into the running Hyprland from a fresh /tmp path
 make unload-all # unload every loaded copy
+make SKIP_VERSION_CHECK=1   # bypass the ABI guard (development only)
 ```
 
-## Install via hyprpm (build locally)
+Layout:
 
-This is the safest way to get a matching binary for your Hyprland version:
+- `physics.hpp`: launch-velocity estimator and decay integrator. No Hyprland
+  dependencies; deterministic and unit-tested.
+- `kinetic.cpp` / `kinetic.hpp`: the compositor adapter (events, focus, timers,
+  frames, config, gesture ownership).
+- `metrics.*`: optional instrumentation, written from an event-loop idle callback.
+- `main.cpp`: plugin entry, config registration, Lua functions, event hooks.
 
-```bash
-hyprpm add https://github.com/savonovv/hypr-kinetic-scroll
-hyprpm update
-hyprpm enable hypr-kinetic-scroll
-```
+Plugin-owned globals must keep ordinary linkage (no `inline` variables in
+headers): `inline` globals become `STB_GNU_UNIQUE` symbols, glibc then marks
+the .so `NODELETE`, and a rebuilt plugin hot-loaded into the same session binds
+to the previous build's objects. That crashed the compositor once.
 
-## Load / Unload
+## Troubleshooting
 
-Hyprland caches plugins by path. When reloading after rebuilds, unload and load
-from a fresh path:
-
-```bash
-# unload (if previously loaded)
-for p in /tmp/hypr-kinetic-scroll-*.so; do hyprctl plugin unload "$p"; done
-
-# load from a new temp path
-TMP=/tmp/hypr-kinetic-scroll-$(date +%s).so
-cp hypr-kinetic-scroll.so "$TMP"
-hyprctl plugin load "$TMP"
-```
-
-## Configuration
-
-Add these to your Hyprland config (e.g. `~/.config/hypr/input.conf`):
-
-```ini
-plugin:kinetic-scroll:enabled = 1
-plugin:kinetic-scroll:decel = 0.967
-plugin:kinetic-scroll:min_velocity = 0.5
-plugin:kinetic-scroll:interval_ms = 16
-plugin:kinetic-scroll:delta_multiplier = 1.0
-plugin:kinetic-scroll:velocity_window_ms = 32
-plugin:kinetic-scroll:lift_tail_grace_ms = 28
-plugin:kinetic-scroll:lift_tail_fade_ms = 80
-plugin:kinetic-scroll:disable_in_browser = 1
-plugin:kinetic-scroll:stop_on_target_change = 1
-plugin:kinetic-scroll:disabled_classes =
-
-# Optional debug
-plugin:kinetic-scroll:debug = 0
-plugin:kinetic-scroll:stop_on_click = 0
-plugin:kinetic-scroll:stop_on_focus = 0
-```
-
-### Per-App Rules
-
-For INI configs, disable kinetic scrolling per app with
-`plugin:kinetic-scroll:disabled_classes`. Classes are exact matches and can be
-separated by commas or spaces.
-
-```ini
-plugin:kinetic-scroll:disabled_classes = org.telegram.desktop
-plugin:kinetic-scroll:disabled_classes = org.telegram.desktop, steam
-```
-
-Find a window's class with `hyprctl clients` or `xprop`.
-
-Lua configs can use the same exact class matching through plugin functions:
-
-```lua
-hl.plugin.kinetic_scroll.disable("org.telegram.desktop")
-hl.plugin.kinetic_scroll.disable("chromium")
-```
-
-To enable kinetic scrolling only in selected apps from Lua:
-
-```lua
-hl.plugin.kinetic_scroll.disable_default()
-hl.plugin.kinetic_scroll.enable("steam")
-hl.plugin.kinetic_scroll.enable("org.gnome.Nautilus")
-```
-
-Available Lua functions:
-
-```lua
-hl.plugin.kinetic_scroll.enable(class)
-hl.plugin.kinetic_scroll.disable(class)
-hl.plugin.kinetic_scroll.enable_default()
-hl.plugin.kinetic_scroll.disable_default()
-hl.plugin.kinetic_scroll.reset_rules()
-```
-
-`kinetic-scroll-rule` is still available for older legacy INI configs that
-accept plugin keywords:
-
-```ini
-kinetic-scroll-rule disable firefox
-kinetic-scroll-rule enable firefox
-```
-
-Notes:
-
-- `decel` is the velocity multiplier per 16 ms, applied continuously over the real elapsed time (0.967 is close to macOS; lower = faster stop).
-- `min_velocity` is the cutoff, in scroll units per 16 ms, below which inertia stops (and below which a lift launches nothing).
-- `velocity_window_ms`: the launch velocity is the mean speed of the touchpad reports within this many ms before the *last* report, so a flick that accelerates to the end launches at its end speed.
-- `lift_tail_grace_ms` / `lift_tail_fade_ms`: the motionless time between the last report and the finger lift. Up to the grace it costs nothing (a lift takes a few report intervals even at full speed); from there the launch fades linearly to nothing at the fade value, so "scroll, pause, lift" launches nothing.
-- `interval_ms` is only a watchdog: momentum is emitted once per compositor frame of the target monitor; the timer steps in when no frame arrives (nothing damaged, DPMS).
-- `delta_multiplier` scales the launch velocity (1.0 = the finger's speed at lift).
-- `disable_in_browser` keeps native browser kinetic scrolling when set to `1`.
-- `disabled_classes` disables kinetic scrolling for exact window classes.
-- `stop_on_target_change` stops active inertia when scroll target window changes.
-
-The plugin also respects Hyprland's `input:touchpad:scroll_factor` for
-synthetic events.
-
-## Test / Verify
-
-1) Load the plugin (or enable via hyprpm).
-2) Run `hyprctl plugin list` and verify `hypr-kinetic-scroll` is listed.
-3) Move two fingers, keep them touching, and stop moving. The view should stop
-   immediately without momentum.
-4) Do a short two-finger scroll and lift. You should see momentum.
-5) Touch the pad with one finger while momentum is active. Scrolling should
-   stop immediately.
-6) Scroll quickly, stop with both fingers still touching, then lift them. No
-   queued momentum should resume after the lift.
-
-## Debug
-
-When `plugin:kinetic-scroll:debug = 1`, the plugin writes to:
-
-```
-/tmp/hypr-kinetic-scroll.log
-```
-
-This log shows incoming axis events, timing, and state transitions.
-
-## Notes / Troubleshooting
-
-- Some touchpads report scrolls as `mouse` events with smooth deltas. The plugin
-  treats `mouse=1` with `deltaDiscrete=0` as eligible touchpad input.
-- The plugin refuses to load into a Hyprland it was not built against (ABI
-  guard; a notification names both versions). Rebuild with `make update` (hyprpm)
-  or `make`. `make SKIP_VERSION_CHECK=1` bypasses the guard for development only.
+- **A swipe is sometimes ignored entirely** (no scrolling at all, not just no
+  momentum). That happens before the plugin: libinput's thumb heuristic
+  suppresses one touch when the two fingers land far apart vertically (more
+  than 25 mm) with the lower one near the bottom edge, and disable-while-typing
+  drops touches that start right after a keypress. Keep the fingers level and
+  away from the bottom edge; consider `input:touchpad:disable_while_typing =
+  false`. Hyprland's log shows libinput's decision for each touch.
+- **Some touchpads report scrolls as mouse events with smooth deltas.** Those
+  are handled too; they launch after 50 ms of silence since they have no lift event.
+- **Version mismatch on load**: rebuild against the running Hyprland
+  (`make update` with hyprpm, or `make`).
 
 ## License
 
