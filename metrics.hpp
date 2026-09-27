@@ -151,7 +151,7 @@ namespace Metrics {
     // scope) to a stat chosen at destruction time.
     class CScope {
       public:
-        explicit CScope(SStat* stat) : m_stat(stat), m_t0(nowNs()), m_flush0(g_metrics.flushNsTotal()) {}
+        explicit CScope(SStat* stat) : m_stat(stat), m_t0(stat ? nowNs() : 0), m_flush0(g_metrics.flushNsTotal()) {}
         void retarget(SStat* stat) {
             m_stat = stat;
         }

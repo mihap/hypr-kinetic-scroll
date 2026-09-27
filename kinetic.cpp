@@ -175,6 +175,7 @@ bool KineticState::beginGesture(const IPointer::SAxisEvent& e, bool touchpadSour
     m_g.stopOnTargetChange = *m_cfg.stopOnTargetChange != 0;
     m_g.intervalMs         = std::max<int64_t>(1, *m_cfg.intervalMs);
     m_g.windowMs           = std::max<int64_t>(8, *m_cfg.velocityWindowMs);
+    m_g.tailCapMs          = std::max<int64_t>(0, *m_cfg.liftTailCapMs);
     m_g.launchMultiplier   = *m_cfg.deltaMultiplier;
     // decel is the velocity multiplier per 16 ms (0.967 ~ macOS). Convert to a
     // continuous rate so the integral is exact for any frame time.
@@ -227,7 +228,7 @@ bool KineticState::onAxis(IPointer::SAxisEvent& e) {
         int64_t       flush0;
         ~SAxisScope() {
             auto& m = Metrics::g_metrics;
-            if (!m.enabled())
+            if (!m.enabled() || t0 == 0)
                 return;
             const double ns = static_cast<double>(Metrics::nowNs() - t0 - (m.flushNsTotal() - flush0));
             if (m.active() && (self->m_state == eState::TRACKING || self->m_state == eState::DECAYING))
@@ -235,7 +236,7 @@ bool KineticState::onAxis(IPointer::SAxisEvent& e) {
             else
                 m.global().idleAxisNs.add(ns);
         }
-    } axisScope{this, Metrics::nowNs(), Metrics::g_metrics.flushNsTotal()};
+    } axisScope{this, Metrics::g_metrics.enabled() ? Metrics::nowNs() : 0, Metrics::g_metrics.flushNsTotal()};
 
     if (!*m_cfg.enabled)
         return false;
@@ -371,6 +372,11 @@ void KineticState::onTouchpadContact() {
 // Velocity at lift, in scroll units per ms, from the deltas of the last
 // windowMs before liftMs. Time the fingers spent still just before lifting
 // counts against it, so "scroll, pause, lift" launches nothing.
+//
+// The tail (last motion report to libinput's stop) is capped: a lift takes a
+// few report intervals during which contact is fading and no motion is
+// reported, and counting all of it would launch every fast flick slower than
+// the finger was moving. Beyond the cap the fingers really were resting.
 void KineticState::computeLaunchVelocity(uint32_t liftMs) {
     m_velocityV = 0.0;
     m_velocityH = 0.0;
@@ -379,9 +385,10 @@ void KineticState::computeLaunchVelocity(uint32_t liftMs) {
     if (tail > m_g.windowMs)
         return;
 
-    double   sumV  = 0.0;
-    double   sumH  = 0.0;
-    uint32_t sumDt = 0;
+    double   sumV   = 0.0;
+    double   sumH   = 0.0;
+    uint32_t sumDt  = 0;
+    uint32_t lastDt = 0;
     for (size_t i = 0; i < m_sampleCount; ++i) {
         const auto& s = m_samples[(m_sampleHead + SAMPLE_CAP - 1 - i) % SAMPLE_CAP];
         if (s.t > liftMs)
@@ -390,17 +397,26 @@ void KineticState::computeLaunchVelocity(uint32_t liftMs) {
             break;
         if (s.dt == 0)
             continue; // first event of a gesture: covers unknown time
+        if (lastDt == 0)
+            lastDt = s.dt;
         sumV += s.dv;
         sumH += s.dh;
         sumDt += s.dt;
     }
 
-    const double span = static_cast<double>(sumDt + tail);
+    // Auto cap: 1.5 report intervals, bounded so odd devices stay sane.
+    const uint32_t cap        = m_g.tailCapMs > 0 ? static_cast<uint32_t>(m_g.tailCapMs) : std::clamp<uint32_t>(lastDt + lastDt / 2, 8, 24);
+    const uint32_t tailCounted = std::min(tail, cap);
+    const double   span        = static_cast<double>(sumDt + tailCounted);
     if (sumDt == 0 || span <= 0.0)
         return;
 
-    m_velocityV = sumV / span * m_g.launchMultiplier;
-    m_velocityH = sumH / span * m_g.launchMultiplier;
+    // Up to two caps of tail is lift mechanics and costs nothing. Beyond that
+    // the fingers were hesitating: fade linearly to zero at the window edge.
+    const uint32_t grace = 2 * cap;
+    const double   rest  = tail <= grace || m_g.windowMs <= grace ? 1.0 : 1.0 - static_cast<double>(tail - grace) / static_cast<double>(m_g.windowMs - grace);
+    m_velocityV       = sumV / span * rest * m_g.launchMultiplier;
+    m_velocityH       = sumH / span * rest * m_g.launchMultiplier;
 
     if (Metrics::g_metrics.enabled()) {
         auto& g   = Metrics::g_metrics.gesture();
@@ -519,7 +535,7 @@ void KineticState::step(bool fromRender) {
     m_velocityV *= k;
     m_velocityH *= k;
 
-    emitSyntheticScroll(deltaV, deltaH);
+    emitSyntheticScroll(deltaV, deltaH, std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
 
     if (auto* l = log())
         *l << "[hypr-kinetic-scroll] step src=" << (fromRender ? "render" : "timer") << " dt=" << dt << " dV=" << deltaV << " v=" << m_velocityV << "\n";
@@ -538,12 +554,9 @@ void KineticState::step(bool fromRender) {
     wl_event_source_timer_update(m_timer, watchdog);
 }
 
-void KineticState::emitSyntheticScroll(double deltaV, double deltaH) {
+void KineticState::emitSyntheticScroll(double deltaV, double deltaH, uint32_t timeMs) {
     if (!g_pSeatManager || (deltaV == 0.0 && deltaH == 0.0))
         return;
-
-    const auto     now    = std::chrono::steady_clock::now();
-    const uint32_t timeMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
     if (Metrics::g_metrics.enabled()) {
         auto& g = Metrics::g_metrics.gesture();
