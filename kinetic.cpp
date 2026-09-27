@@ -188,6 +188,12 @@ bool KineticState::beginGesture(const IPointer::SAxisEvent& e, bool touchpadSour
     m_lastEventMs = 0;
     m_state       = eState::TRACKING;
 
+    // Metrics sink is re-read once per gesture (string copy); hot paths only
+    // test the cached bool.
+    {
+        const std::string metricsPath = *m_cfg.metricsFile;
+        Metrics::g_metrics.setEnabled(!metricsPath.empty(), metricsPath);
+    }
     if (Metrics::g_metrics.enabled())
         Metrics::g_metrics.gestureBegin(Metrics::nowNs(), PWIN ? PWIN->m_class : std::string{});
 
