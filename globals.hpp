@@ -3,10 +3,15 @@
 #include <hyprland/src/config/ConfigValue.hpp>
 #include <string>
 
-inline HANDLE PHANDLE = nullptr;
+// Plain extern globals, defined once in main.cpp. Deliberately NOT `inline`:
+// inline variables become STB_GNU_UNIQUE symbols, which makes glibc mark the
+// .so NODELETE (dlclose never unmaps it) and binds every later build of the
+// plugin to the first build's object. That crashed Hyprland when the layout of
+// such an object changed between builds.
+extern HANDLE PHANDLE;
 
 class KineticState;
-inline KineticState* g_pKineticState = nullptr;
+extern KineticState* g_pKineticState;
 
 inline int getKineticConfigInt(const std::string& name, int fallback) {
     const auto OPTION = CConfigValue<Config::INTEGER>("plugin:kinetic-scroll:" + name);

@@ -5,6 +5,8 @@
 
 namespace Metrics {
 
+    CCollector g_metrics;
+
     static void stat(std::ostringstream& o, const char* name, const SStat& s) {
         o << "\"" << name << "\":{\"n\":" << s.n << ",\"mean\":" << s.mean() << ",\"stddev\":" << s.stddev() << ",\"min\":" << s.min << ",\"max\":" << s.max << "}";
     }

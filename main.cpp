@@ -16,6 +16,9 @@ extern "C" {
 #include <lua.h>
 }
 
+HANDLE        PHANDLE         = nullptr;
+KineticState* g_pKineticState = nullptr;
+
 static Hyprutils::Signal::CHyprSignalListener g_pAxisCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pButtonCallback;
 static Hyprutils::Signal::CHyprSignalListener g_pWindowCallback;

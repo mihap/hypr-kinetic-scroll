@@ -142,7 +142,8 @@ namespace Metrics {
         SGlobal     m_global;
     };
 
-    inline CCollector g_metrics;
+    // Defined in metrics.cpp. Not `inline`: see the note in globals.hpp.
+    extern CCollector g_metrics;
 
     // RAII: adds elapsed ns (minus any metrics flush that happened inside the
     // scope) to a stat chosen at destruction time.
