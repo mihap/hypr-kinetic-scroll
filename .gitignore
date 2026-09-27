@@ -4,3 +4,5 @@
 *.dylib
 *.dll
 build/
+bench/data/
+tests/physics_test
