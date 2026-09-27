@@ -127,9 +127,16 @@ namespace Metrics {
         // Finalize and append one JSON line. Called from stopKinetic.
         void gestureEnd(int64_t now, const char* reason);
 
+        // Cumulative ns spent serializing and writing gesture lines. Scopes
+        // subtract the delta so the metrics' own I/O never shows up as plugin cost.
+        int64_t flushNsTotal() const {
+            return m_flushNs;
+        }
+
       private:
         bool        m_enabled = false;
         bool        m_active  = false;
+        int64_t     m_flushNs = 0;
         std::string m_path;
         SGesture    m_gesture;
         SGlobal     m_global;
@@ -137,16 +144,17 @@ namespace Metrics {
 
     inline CCollector g_metrics;
 
-    // RAII: adds elapsed ns to a stat chosen at destruction time.
+    // RAII: adds elapsed ns (minus any metrics flush that happened inside the
+    // scope) to a stat chosen at destruction time.
     class CScope {
       public:
-        explicit CScope(SStat* stat) : m_stat(stat), m_t0(nowNs()) {}
+        explicit CScope(SStat* stat) : m_stat(stat), m_t0(nowNs()), m_flush0(g_metrics.flushNsTotal()) {}
         void retarget(SStat* stat) {
             m_stat = stat;
         }
         ~CScope() {
             if (m_stat)
-                m_stat->add(static_cast<double>(nowNs() - m_t0));
+                m_stat->add(static_cast<double>(nowNs() - m_t0 - (g_metrics.flushNsTotal() - m_flush0)));
         }
         int64_t start() const {
             return m_t0;
@@ -155,5 +163,6 @@ namespace Metrics {
       private:
         SStat*  m_stat;
         int64_t m_t0;
+        int64_t m_flush0;
     };
 }

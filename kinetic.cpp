@@ -111,17 +111,19 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
     struct SAxisScope {
         KineticState* self;
         int64_t       t0;
+        int64_t       flush0;
         ~SAxisScope() {
             auto& m = Metrics::g_metrics;
             if (!m.enabled())
                 return;
-            const double ns = static_cast<double>(Metrics::nowNs() - t0);
+            // Exclude the JSON write of a gesture finalized inside this call.
+            const double ns = static_cast<double>(Metrics::nowNs() - t0 - (m.flushNsTotal() - flush0));
             if (m.active() && (self->m_tracking || self->m_decaying))
                 m.gesture().axisNs.add(ns);
             else
                 m.global().idleAxisNs.add(ns);
         }
-    } axisScope{this, Metrics::nowNs()};
+    } axisScope{this, Metrics::nowNs(), Metrics::g_metrics.flushNsTotal()};
 
     if (!getKineticConfigInt("enabled", 1))
         return;

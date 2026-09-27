@@ -27,6 +27,8 @@ namespace Metrics {
         if (!m_enabled || m_path.empty())
             return;
 
+        const int64_t flushStart = nowNs();
+
         auto& g      = m_gesture;
         g.tEnd       = now;
         g.stopReason = reason ? reason : "";
@@ -68,5 +70,7 @@ namespace Metrics {
         std::ofstream f(m_path, std::ios::app);
         if (f.is_open())
             f << o.str();
+
+        m_flushNs += nowNs() - flushStart;
     }
 }
