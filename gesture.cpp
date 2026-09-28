@@ -104,6 +104,12 @@ namespace Gesture {
     }
 
     void CMachine::onTimer() {
+        // Disabled since the timer was armed: nothing is ours any more. Close
+        // what we owned rather than launch or keep flinging.
+        if (m_state != eState::IDLE && !m_host.enabled()) {
+            stop(eStop::RULE_DISABLED);
+            return;
+        }
         switch (m_state) {
             case eState::IDLE: break;
             case eState::IGNORED:
@@ -381,6 +387,13 @@ namespace Gesture {
     void CMachine::step(bool fromRender) {
         Metrics::CScope stepScope(Metrics::g_metrics.enabled() ? &Metrics::g_metrics.gesture().stepNs : nullptr);
 
+        // Disabled mid-fling (kinetic-toggle, config reload): stop now, not at
+        // the next real axis event, which may never come.
+        if (!m_host.enabled()) {
+            stepScope.retarget(nullptr);
+            stop(eStop::RULE_DISABLED);
+            return;
+        }
         if (m_host.inputCaptured()) {
             stepScope.retarget(nullptr);
             stop(eStop::CAPTURED);

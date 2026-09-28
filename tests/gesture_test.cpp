@@ -428,7 +428,9 @@ int main() {
         check(m.state() == CMachine::eState::IGNORED, "no pointer-focus surface: ignored");
     }
 
-    // 13. Disabled mid-momentum: the gesture is closed, events pass through.
+    // 13. Disabled mid-momentum (kinetic-toggle off): momentum stops on the
+    //     very next frame or watchdog tick, without waiting for a real axis
+    //     event that may never come; the owed stop is settled.
     {
         CFakeHost h;
         CMachine  m(h);
@@ -437,9 +439,40 @@ int main() {
         h.clock += 8;
         m.onFrame();
         h.on = false;
-        check(!m.onAxis(delta(1200, 7.0)) && m.idle(), "disabling closes the gesture on the next event");
+        h.clock += 8;
+        m.onFrame();
+        check(m.idle() && h.emits.size() == 1, "disabling stops momentum on the next frame");
         check(h.stops.size() == 1 && h.stops[0] == AXIS_V, "the owed stop is delivered");
-        check(!m.onAxis(delta(1210, 7.0)) && m.idle(), "while disabled nothing is tracked");
+        check(!m.onAxis(delta(1200, 7.0)) && m.idle(), "while disabled nothing is tracked");
+    }
+    {
+        CFakeHost h;
+        CMachine  m(h);
+        const auto last = flick(m, 1000);
+        m.onAxis(liftEvent(last + 7));
+        h.on = false;
+        h.clock += 16;
+        m.onTimer();
+        check(m.idle() && h.emits.empty() && h.stops.size() == 1, "disabling stops momentum on the watchdog tick too");
+    }
+    {
+        CFakeHost h;
+        CMachine  m(h);
+        for (int i = 0; i < 6; ++i)
+            m.onAxis(mouseSmooth(1000 + 8 * i, 8.0));
+        h.on = false;
+        m.onTimer();
+        check(m.idle() && h.emits.empty() && h.stops.empty(), "a timer-driven launch does not happen once disabled");
+    }
+    {
+        CFakeHost h;
+        CMachine  m(h);
+        const auto last = flick(m, 1000);
+        m.onAxis(liftEvent(last + 7));
+        h.clock += 8;
+        m.onFrame();
+        h.on = false;
+        check(!m.onAxis(delta(1200, 7.0)) && m.idle() && h.stops.size() == 1, "a real axis event while disabled closes the gesture as well");
     }
 
     // 14. Input capture takes the seat: momentum ends on the next step.
