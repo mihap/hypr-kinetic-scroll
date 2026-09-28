@@ -185,7 +185,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             g_pKineticState->onRenderPre(mon);
     });
 
-    return {"hypr-kinetic-scroll", "Kinetic (inertial) scrolling for touchpads", "savonovv", "0.1"};
+    return {"hypr-kinetic-scroll", "Kinetic (inertial) scrolling for touchpads", "savonovv, mihap", "1.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

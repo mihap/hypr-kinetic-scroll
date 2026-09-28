@@ -1,10 +1,10 @@
 [repository]
 name = "hypr-kinetic-scroll"
-authors = ["savonovv"]
+authors = ["savonovv", "mihap"]
 commit_pins = []
 
 [hypr-kinetic-scroll]
 description = "Kinetic (inertial) scrolling for touchpads at the compositor level"
-authors = ["savonovv"]
+authors = ["savonovv", "mihap"]
 output = "hypr-kinetic-scroll.so"
 build = ["make all"]
