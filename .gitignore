@@ -6,3 +6,4 @@
 build/
 bench/data/
 tests/physics_test
+tests/gesture_test

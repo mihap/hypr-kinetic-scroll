@@ -154,7 +154,7 @@ deterministic fixture. Protocol and how to read the numbers: `bench/README.md`.
 
 ```bash
 make            # build hypr-kinetic-scroll.so
-make test       # compositor-free physics tests (tests/physics_test.cpp)
+make test       # compositor-free tests: physics and the gesture state machine (tests/)
 make dev-load   # build and hot-load into the running Hyprland from a fresh /tmp path
 make unload-all # unload every loaded copy
 make SKIP_VERSION_CHECK=1   # bypass the ABI guard (development only)
@@ -163,9 +163,17 @@ make SKIP_VERSION_CHECK=1   # bypass the ABI guard (development only)
 Layout:
 
 - `physics.hpp`: launch-velocity estimator and decay integrator. No Hyprland
-  dependencies; deterministic and unit-tested.
-- `kinetic.cpp` / `kinetic.hpp`: the compositor adapter (events, focus, timers,
-  frames, config, gesture ownership).
+  dependencies; deterministic and unit-tested (`tests/physics_test.cpp`).
+- `gesture.hpp` / `gesture.cpp`: the gesture state machine and per-app
+  policy. Every decision lives here: which events are ours, when momentum
+  launches, what is emitted per frame, which `axis_stop` events are owed and
+  when they are settled, how a gesture ends. It talks to the compositor only
+  through `Gesture::IHost`, so `tests/gesture_test.cpp` drives it with a
+  scripted host: flicks, hand-offs, focus changes, destroyed targets, capture,
+  unload, watchdog cadence, smooth mice.
+- `kinetic.cpp` / `kinetic.hpp`: the Hyprland side (`IHost`): pointer devices,
+  focus and target references, seat calls, event-loop timer, frames, config
+  handles, debug log. No decisions.
 - `metrics.*`: optional instrumentation, written from an event-loop idle callback.
 - `main.cpp`: plugin entry, config registration, Lua functions, event hooks.
 

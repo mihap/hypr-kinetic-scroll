@@ -11,8 +11,14 @@ ifdef SKIP_VERSION_CHECK
 CXXFLAGS += -DKINETIC_SKIP_VERSION_CHECK
 endif
 
-SRC = main.cpp kinetic.cpp metrics.cpp
+SRC = main.cpp kinetic.cpp gesture.cpp metrics.cpp
 OUT = $(PLUGIN_NAME).so
+HDR = globals.hpp kinetic.hpp gesture.hpp metrics.hpp physics.hpp
+
+# Compositor-free tests: the physics and the gesture state machine. Only
+# libwayland-server is needed (metrics.cpp's idle callback), not Hyprland.
+TESTS         = tests/physics_test tests/gesture_test
+TEST_CXXFLAGS = -O2 -std=c++2b -g -I.
 
 # hyprpm source for `make reinstall`. Override: make reinstall REPO=... BRANCH=...
 REPO   ?= https://github.com/mihap/hypr-kinetic-scroll
@@ -20,18 +26,20 @@ BRANCH ?=
 
 all: $(OUT)
 
-$(OUT): $(SRC) globals.hpp kinetic.hpp metrics.hpp physics.hpp
+$(OUT): $(SRC) $(HDR)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(SRC) -o $@ `$(PKG_CONFIG)`
 
 clean:
-	rm -f $(OUT) tests/physics_test
+	rm -f $(OUT) $(TESTS)
 
-# Compositor-free physics tests (no Hyprland headers needed).
-test: tests/physics_test
-	./tests/physics_test
+test: $(TESTS)
+	@for t in $(TESTS); do echo "== $$t"; ./$$t || exit 1; done
 
 tests/physics_test: tests/physics_test.cpp physics.hpp
-	$(CXX) -O2 -std=c++2b -I. $< -o $@
+	$(CXX) $(TEST_CXXFLAGS) $< -o $@
+
+tests/gesture_test: tests/gesture_test.cpp gesture.cpp gesture.hpp metrics.cpp metrics.hpp physics.hpp
+	$(CXX) $(TEST_CXXFLAGS) $< gesture.cpp metrics.cpp -o $@ `pkg-config --cflags --libs wayland-server`
 
 # --- hyprpm -----------------------------------------------------------------
 # hyprpm clones the repository's default branch only, so BRANCH must be a

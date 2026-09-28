@@ -28,10 +28,9 @@ static void onMouseAxis(const IPointer::SAxisEvent& e, Event::SCallbackInfo& inf
     if (!g_pKineticState)
         return;
 
-    auto event = e;
     // Real scroll deltas always pass through. Only the finger-lift stop is
     // swallowed while momentum is live; the plugin sends its own stop later.
-    if (g_pKineticState->onAxis(event))
+    if (g_pKineticState->onAxis(e))
         info.cancelled = true;
 }
 
@@ -39,14 +38,14 @@ static void onMouseButton(const IPointer::SButtonEvent& e, Event::SCallbackInfo&
     if (!g_pKineticState || e.state != WL_POINTER_BUTTON_STATE_PRESSED)
         return;
     if (*g_pKineticState->config().stopOnClick)
-        g_pKineticState->stopKinetic(eStop::MOUSE_BUTTON);
+        g_pKineticState->stopKinetic(Gesture::eStop::MOUSE_BUTTON);
 }
 
 static void onActiveWindow() {
     if (!g_pKineticState)
         return;
     if (*g_pKineticState->config().stopOnFocus)
-        g_pKineticState->stopKinetic(eStop::ACTIVE_WINDOW);
+        g_pKineticState->stopKinetic(Gesture::eStop::ACTIVE_WINDOW);
 }
 
 static void onConfigPreReload() {
